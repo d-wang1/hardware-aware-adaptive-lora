@@ -1,0 +1,12 @@
+torch>=2.2
+transformers>=4.40
+datasets>=2.18
+peft>=0.10
+accelerate>=0.29
+numpy>=1.26
+pandas>=2.2
+matplotlib>=3.8
+pyyaml>=6.0
+tqdm>=4.66
+scikit-learn>=1.4
+pytest>=8.0

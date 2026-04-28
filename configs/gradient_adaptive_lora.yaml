@@ -1,0 +1,38 @@
+method: gradient_adaptive   # equivalent to hardware_aware with alpha = 0.0
+
+model:
+  name: distilbert-base-uncased
+  task: sst2
+
+lora:
+  target_modules:
+    - q_lin
+    - v_lin
+  initial_rank: 8
+  min_rank: 2
+  max_rank: 16
+  total_rank_budget: 96
+  alpha_lora: 16
+  dropout: 0.0
+
+allocator:
+  hardware_alpha: 0.0       # gradient-only — no hardware-cost penalty
+  ema_beta: 0.9
+  cost_proxy: parameter     # c_i = d_i + k_i
+
+training:
+  batch_size: 32
+  learning_rate: 2.0e-4
+  epochs: 3
+  warmup_steps: 200
+  eval_interval: 100
+  seed: 42
+
+hardware:
+  log_memory: true
+  log_wall_clock: true
+  log_examples_per_second: true
+
+logging:
+  output_dir: results/raw_logs/gradient_adaptive
+  target_accuracy: 0.90
