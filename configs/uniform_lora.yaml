@@ -1,0 +1,30 @@
+method: uniform
+
+model:
+  name: distilbert-base-uncased
+  task: sst2
+
+lora:
+  target_modules:
+    - q_lin
+    - v_lin
+  rank: 8                  # uniform across all target modules
+  total_rank_budget: 96    # n_modules (12) * rank (8) — used as the shared budget across methods
+  alpha_lora: 16           # LoRA scaling factor
+  dropout: 0.0
+
+training:
+  batch_size: 32
+  learning_rate: 2.0e-4
+  epochs: 3
+  eval_interval: 100
+  seed: 42
+
+hardware:
+  log_memory: true
+  log_wall_clock: true
+  log_examples_per_second: true
+
+logging:
+  output_dir: results/raw_logs/uniform
+  target_accuracy: 0.90

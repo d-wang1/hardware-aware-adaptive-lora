@@ -1,0 +1,36 @@
+method: adalora
+
+model:
+  name: distilbert-base-uncased
+  task: sst2
+
+lora:
+  target_modules:
+    - q_lin
+    - v_lin
+  init_r: 12               # AdaLoRA starting rank per module
+  target_r: 8              # average rank after pruning — keeps total budget ~ uniform's 96
+  total_rank_budget: 96
+  alpha_lora: 16
+  dropout: 0.0
+  beta1: 0.85
+  beta2: 0.85
+  tinit: 200
+  tfinal: 1000
+  deltaT: 10
+
+training:
+  batch_size: 32
+  learning_rate: 2.0e-4
+  epochs: 3
+  eval_interval: 100
+  seed: 42
+
+hardware:
+  log_memory: true
+  log_wall_clock: true
+  log_examples_per_second: true
+
+logging:
+  output_dir: results/raw_logs/adalora
+  target_accuracy: 0.90
