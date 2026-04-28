@@ -1,0 +1,22 @@
+/.venv
+
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Experiment artifacts
+results/raw_logs/*
+results/summaries/*
+results/figures/*
+!results/raw_logs/.gitkeep
+!results/summaries/.gitkeep
+!results/figures/.gitkeep
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
