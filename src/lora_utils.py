@@ -16,6 +16,8 @@ import torch.nn as nn
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from peft.tuners.lora import Linear as LoraLinear
 
+_PEFT_PREFIX = "base_model.model."
+
 
 def parameter_cost(in_dim: int, out_dim: int) -> int:
     """Per-rank trainable parameter cost: every additional rank adds one row
@@ -118,8 +120,10 @@ def build_non_uniform_lora_model(
     Used for Stage 2 of the two-stage adaptive flow: after the allocator
     decides each module's rank, we throw away the warmup PEFT wrapper and
     rebuild a fresh one with ``LoraConfig.rank_pattern``. Keys in
-    ``rank_dict`` are the same fqnames produced by ``enumerate_lora_modules``;
-    PEFT regex-matches them against module names after wrapping.
+    ``rank_dict`` are the same fqnames produced by ``enumerate_lora_modules``
+    (post-wrap, prefixed with ``base_model.model.``); we strip that prefix
+    before handing them to PEFT, which matches ``rank_pattern`` keys against
+    *pre-wrap* paths inside the base model.
 
     The default ``r`` is set to ``max(rank_dict.values())`` so any unmatched
     module — there shouldn't be any if the dict came straight from
@@ -136,6 +140,9 @@ def build_non_uniform_lora_model(
     if any(r < 1 for r in rank_dict.values()):
         raise ValueError(f"all ranks must be >= 1; got {dict(rank_dict)}")
     default_r = max(rank_dict.values())
+    peft_rank_pattern = {
+        k.removeprefix(_PEFT_PREFIX): v for k, v in rank_dict.items()
+    }
     config = LoraConfig(
         r=default_r,
         lora_alpha=alpha,
@@ -143,6 +150,6 @@ def build_non_uniform_lora_model(
         lora_dropout=dropout,
         bias="none",
         task_type=task_type,
-        rank_pattern=dict(rank_dict),
+        rank_pattern=peft_rank_pattern,
     )
     return get_peft_model(base_model, config)
