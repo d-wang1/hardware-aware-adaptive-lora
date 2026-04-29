@@ -14,9 +14,10 @@ Hardware-Aware Adaptive LoRA Rank Allocation. Distributes a fixed rank budget ac
 - Phase 2 ✅ — `src/hardware_logger.py`: JSONL writer, throughput EMA, peak memory via `torch.cuda.max_memory_allocated`, `scheduler_block()` ctx manager. Round-trips arbitrary fields (Phase 5.3 logs `event="reallocation"` + `rank_dict`).
 - Phase 3 ✅ — `src/evaluate.py`: `evaluate()` → `{val_loss, val_accuracy}`; `TargetAccuracyTracker` locks first crossing of `val_accuracy >= target`.
 - Phase 4a ✅ — `src/lora_utils.py`: `parameter_cost`, `enumerate_lora_modules`, `build_uniform_lora_model` (4a.1.A); `lora_grad_norms` (Frobenius A+B grads, 0.0 for None grads), `build_non_uniform_lora_model` (`LoraConfig.rank_pattern`) (4a.1.B).
+- Phase 4b ✅ — `src/rank_allocator.py`: `HardwareAwareRankAllocator` with EMA gradient scores (seeded at first observation), `parameter_cost`-based costs, `s_i = g_i / c_i^α`, and budget-preserving allocation (floor at min_rank → proportional split → cap at max_rank → deterministic 1-rank rebalance to exact budget). One-shot `allocate(peft_model)` for the warmup→stage-2 hand-off.
 - Tests in [src/tests/](src/tests/) — all passing on CUDA box (one CPU-only test correctly skipped).
 - Demos: [notebooks/demo_phase_1.ipynb](notebooks/demo_phase_1.ipynb), `demo.py`, `demo_lora.py`, `demo_lora_grads.py` at repo root.
-- **Next: Phase 4b** — `src/rank_allocator.py`: `HardwareAwareRankAllocator` with EMA over `lora_grad_norms`, score `s_i = g_i / c_i^α`, top-k allocation that preserves the `total_rank_budget: 96` invariant.
+- **Next: Phase 5** — `src/train.py`: unified entry point dispatching on `config["method"]` ∈ {uniform, adalora, gradient_adaptive, hardware_aware}; two-stage warmup→reallocate→fine-tune for the adaptive methods; AdaLoRA via PEFT.
 
 When updating: replace, don't append.
 
