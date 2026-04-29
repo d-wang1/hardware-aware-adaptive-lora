@@ -1,9 +1,16 @@
+# Upper bounds avoid a Windows DLL conflict where importing torch before
+# datasets triggers a silent process kill from pyarrow's bundled native
+# libs. Working intersection: numpy<2, pyarrow<15, datasets<3.
+# Mac/Linux are unaffected by the conflict but tolerate the older versions.
+# See CLAUDE.md "Environments" for full diagnosis.
+
 torch>=2.2
 transformers>=4.40
-datasets>=2.18
+datasets>=2.18,<3
 peft>=0.10
 accelerate>=0.29
-numpy>=1.26
+numpy>=1.26,<2
+pyarrow<15
 pandas>=2.2
 matplotlib>=3.8
 pyyaml>=6.0

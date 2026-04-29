@@ -36,16 +36,31 @@ This applies *within* phases as well as between them.
 - **Don't auto-stage untracked files.** `git add <specific-file>`, never `git add .`.
 
 ### Environments
-One repo, multiple venvs (one per machine; `requirements.txt` stays cross-platform with no CUDA pins):
+One repo, multiple venvs (one per machine). `requirements.txt` is cross-platform; upper bounds pin numpy/pyarrow/datasets into the only intersection that works on Windows + CUDA torch (see "Why the upper bounds" below).
 
-- **Mac dev venv** — `python3 -m venv .venv && pip install -r requirements.txt`. CPU-only Torch from PyPI. For editing, syntax checks, `pytest`, smoke runs on tiny subsets. Activate with `source .venv/bin/activate`.
-- **Linux CUDA box** — same setup, CUDA Torch resolved automatically by pip on Linux. Activate with `source .venv/bin/activate`.
-- **Windows CUDA box** (RTX 4070 Laptop, driver 581.x, CUDA 13 capable) — `python -m venv .venv` then activate via `source .venv/Scripts/activate` (Git Bash) or `.\.venv\Scripts\Activate.ps1` (PowerShell). The default PyPI torch wheel is **CPU-only on Windows**, so install the CUDA wheel explicitly after `pip install -r requirements.txt`:
+- **Mac dev venv** — `python3 -m venv .venv && pip install -r requirements.txt`. CPU-only Torch from PyPI. Activate with `source .venv/bin/activate`.
+- **Linux CUDA box** — same setup, CUDA Torch resolved automatically by pip on Linux.
+- **Windows CUDA box** (RTX 4070 Laptop, driver 581.x, CUDA 13 capable) — `python -m venv .venv` then activate via `source .venv/Scripts/activate` (Git Bash) or `.\.venv\Scripts\Activate.ps1` (PowerShell). The default PyPI torch wheel is **CPU-only on Windows**, so swap to the CUDA wheel after `pip install -r requirements.txt`:
   ```
   pip uninstall -y torch
   pip install torch --index-url https://download.pytorch.org/whl/cu124
   ```
-  Verified working: `torch 2.6.0+cu124`, `torch.cuda.is_available() == True`. **Jupyter gotcha**: the kernel can segfault on `import torch` in a notebook (plain `python -c` works fine) due to duplicate OpenMP DLLs (`libiomp5md.dll`) when numpy / scipy were installed before the torch wheel was swapped. Fix is `pip install --force-reinstall --no-deps numpy scipy`. Quick diagnostic bypass (don't ship): `KMP_DUPLICATE_LIB_OK=TRUE` before `jupyter lab`.
+  Verified working: `torch 2.6.0+cu124`, `torch.cuda.is_available() == True`.
+
+#### Why the upper bounds in `requirements.txt`
+Three Windows pitfalls converge on `pyarrow` (datasets' native dep). The only triple that satisfies all three constraints simultaneously is **`numpy<2` + `pyarrow<15` + `datasets<3`** — pinned in `requirements.txt` so a fresh install lands inside the working envelope automatically:
+
+1. **`pyarrow ≥ 15` silently segfaults when torch is imported first** on Windows — a DLL load-order conflict (not OpenMP — `KMP_DUPLICATE_LIB_OK` does not help). Symptom: `python script.py` exits without a traceback partway through imports.
+2. **`pyarrow < 15` is incompatible with `numpy 2.x` ABI** — surfaces as `AttributeError: _ARRAY_API not found` / `ImportError: numpy.core.multiarray failed to import`.
+3. **`datasets ≥ 3` calls `pa.json_()`** which `pyarrow < 15` doesn't expose — surfaces as `AttributeError: module 'pyarrow' has no attribute 'json_'`.
+
+If any of those errors return on a fresh machine, check that the install actually respected the upper bounds: `pip show numpy pyarrow datasets`. The Mac and Linux venvs aren't affected by the DLL conflict, but they tolerate the older versions fine.
+
+#### Jupyter on Windows
+Even within the pinned envelope, the Jupyter kernel can segfault on `import torch` in a notebook (plain `python -c` works) due to duplicate OpenMP DLLs (`libiomp5md.dll`) when numpy/scipy were installed in a sequence that left two MKL bindings on PATH. Fix: `pip install --force-reinstall --no-deps numpy scipy`. Diagnostic-only bypass (don't commit): `KMP_DUPLICATE_LIB_OK=TRUE` before `jupyter lab`.
+
+#### Standalone scripts on Windows
+Any standalone Python entry point that uses DataLoader workers must be wrapped in `if __name__ == "__main__":` — Windows multiprocessing re-imports the script per worker, and without the guard the script either hangs or exits silently during DataLoader bootstrap. The `--smoke` flag in the planned `train.py` will set `num_workers=0` to side-step this, but ad-hoc demos need the guard.
 
 ### Hardware target
 CUDA. Use `torch.cuda.max_memory_allocated()` as the peak-memory metric in `src/hardware_logger.py`. Don't write MPS/CPU fallback as the primary path. Smoke runs may execute on CPU; real experiments require CUDA.
