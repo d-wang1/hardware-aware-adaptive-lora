@@ -11,8 +11,10 @@ import torch
 import torch.nn as nn
 
 from src.lora_utils import (
+    build_non_uniform_lora_model,
     build_uniform_lora_model,
     enumerate_lora_modules,
+    lora_grad_norms,
     parameter_cost,
 )
 
@@ -140,6 +142,139 @@ def test_distilbert_uniform_module_dims_are_768(distilbert_uniform):
         assert info["in_dim"] == 768
         assert info["out_dim"] == 768
         assert info["rank"] == 8
+
+
+# --- lora_grad_norms -----------------------------------------------------
+
+
+def test_grad_norms_zero_before_backward():
+    """Before any backward pass, every param's .grad is None and we return 0.0
+    (rather than raising) so the allocator is safe to call during warmup."""
+    model = _MiniBackbone(in_dim=64, out_dim=64)
+    peft_model = build_uniform_lora_model(
+        model,
+        target_modules=["q_lin", "v_lin"],
+        rank=4,
+        alpha=8,
+        task_type=None,
+    )
+    norms = lora_grad_norms(peft_model)
+    assert len(norms) == 2, list(norms)
+    assert all(v == 0.0 for v in norms.values()), norms
+
+
+def test_grad_norms_positive_after_backward():
+    """A real forward+backward should make every targeted module's grad norm
+    strictly positive — both q_lin and v_lin are on the gradient path of the
+    classifier loss, so neither A nor B can stay at zero grad."""
+    torch.manual_seed(0)
+    model = _MiniBackbone(in_dim=64, out_dim=64)
+    peft_model = build_uniform_lora_model(
+        model,
+        target_modules=["q_lin", "v_lin"],
+        rank=4,
+        alpha=8,
+        task_type=None,
+    )
+    x = torch.randn(8, 64)
+    target = torch.zeros(8, dtype=torch.long)
+    logits = peft_model(x)
+    loss = nn.functional.cross_entropy(logits, target)
+    loss.backward()
+
+    norms = lora_grad_norms(peft_model)
+    assert len(norms) == 2, list(norms)
+    for fqname, value in norms.items():
+        assert value > 0.0, (fqname, value)
+
+
+# --- build_non_uniform_lora_model ----------------------------------------
+
+
+def test_non_uniform_builder_rejects_empty_dict():
+    model = _MiniBackbone()
+    with pytest.raises(ValueError, match="empty"):
+        build_non_uniform_lora_model(
+            model,
+            target_modules=["q_lin", "v_lin"],
+            rank_dict={},
+            alpha=8,
+            task_type=None,
+        )
+
+
+def test_non_uniform_builder_rejects_zero_rank():
+    model = _MiniBackbone()
+    with pytest.raises(ValueError, match=">= 1"):
+        build_non_uniform_lora_model(
+            model,
+            target_modules=["q_lin", "v_lin"],
+            rank_dict={"q_lin": 0, "v_lin": 4},
+            alpha=8,
+            task_type=None,
+        )
+
+
+def test_non_uniform_builder_assigns_per_module_ranks():
+    """Probe the post-wrap fqnames first, then build with two distinct ranks
+    and verify each module ends up at the rank the dict asked for. This is
+    what Stage 2 of the adaptive flow relies on."""
+    in_dim, out_dim = 64, 64
+    probe_model = _MiniBackbone(in_dim=in_dim, out_dim=out_dim)
+    probe = build_uniform_lora_model(
+        probe_model,
+        target_modules=["q_lin", "v_lin"],
+        rank=4,
+        alpha=8,
+        task_type=None,
+    )
+    fqnames = sorted(enumerate_lora_modules(probe).keys())
+    assert len(fqnames) == 2, fqnames
+    rank_dict = {fqnames[0]: 2, fqnames[1]: 6}
+
+    model = _MiniBackbone(in_dim=in_dim, out_dim=out_dim)
+    peft_model = build_non_uniform_lora_model(
+        model,
+        target_modules=["q_lin", "v_lin"],
+        rank_dict=rank_dict,
+        alpha=8,
+        task_type=None,
+    )
+    enumerated = enumerate_lora_modules(peft_model)
+    actual = {n: info["rank"] for n, info in enumerated.items()}
+    assert sorted(actual.values()) == sorted(rank_dict.values()), (
+        actual,
+        rank_dict,
+    )
+
+
+def test_non_uniform_builder_param_count_matches_rank_dict():
+    """Trainable LoRA params == sum_i r_i * (in_dim + out_dim).
+    This is the budget-invariant the allocator depends on: total trainable
+    LoRA params is fully determined by sum(rank_dict.values()) once the
+    geometry is fixed."""
+    in_dim, out_dim = 64, 64
+    probe = build_uniform_lora_model(
+        _MiniBackbone(in_dim=in_dim, out_dim=out_dim),
+        target_modules=["q_lin", "v_lin"],
+        rank=4,
+        alpha=8,
+        task_type=None,
+    )
+    fqnames = sorted(enumerate_lora_modules(probe).keys())
+    rank_dict = {fqnames[0]: 2, fqnames[1]: 6}
+
+    model = _MiniBackbone(in_dim=in_dim, out_dim=out_dim)
+    peft_model = build_non_uniform_lora_model(
+        model,
+        target_modules=["q_lin", "v_lin"],
+        rank_dict=rank_dict,
+        alpha=8,
+        task_type=None,
+    )
+    trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+    expected = sum(r * (in_dim + out_dim) for r in rank_dict.values())
+    assert trainable == expected, (trainable, expected, rank_dict)
 
 
 def test_distilbert_uniform_trainable_params_match_budget(distilbert_uniform):
