@@ -1,91 +1,69 @@
 # CLAUDE.md
 
-Context for Claude Code sessions working in this repo. Loaded automatically — keep it tight, current, and pruned.
+Context for Claude Code sessions in this repo. Loaded automatically — keep tight, current, pruned.
 
 ## Project
 
-Hardware-Aware Adaptive LoRA Rank Allocation. A fixed total rank budget is distributed across LoRA modules using `s_i = g_i / c_i^α` (gradient-norm EMA over per-rank parameter cost). Compared against uniform LoRA, AdaLoRA, and a gradient-only ablation on SST-2 / DistilBERT. The contribution is the allocator + a systems-level evaluation (wall-clock, peak memory, throughput, scheduler overhead), **not** a claim of beating AdaLoRA on accuracy. Full spec in [README.md](README.md). Each Claude session approves its own implementation plan under `~/.claude/plans/<slug>.md` (per-machine; not in repo). Progress is recorded in the commit log — `git log --grep='^Phase'` is the source of truth.
+Hardware-Aware Adaptive LoRA Rank Allocation. Distributes a fixed rank budget across LoRA modules using `s_i = g_i / c_i^α` (gradient-norm EMA over per-rank parameter cost). Compared against uniform LoRA, AdaLoRA, and a gradient-only ablation on SST-2 / DistilBERT. Contribution = allocator + systems-level evaluation (wall-clock, peak memory, throughput, scheduler overhead), **not** beating AdaLoRA on accuracy. Full spec in [README.md](README.md). Per-session plan at `~/.claude/plans/<slug>.md` (per-machine, not in repo). Progress in commit log: `git log --grep='^Phase'`.
 
 ## Current state
 
-- **Phase 0** (bootstrap) ✅ — directory tree, configs for all four methods, run scripts, requirements, Makefile.
-- **Phase 1.1** (`src/data.py`) ✅ — SST-2 loader, tokenizer, `set_seed`, dataloaders.
-- **Phase 1.2** (`src/models.py`) ✅ — DistilBERT loader, target-module enumeration (12 `q_lin`/`v_lin` modules at 768×768), `module_dims` for the Phase 4b cost proxy, `count_parameters`.
-- **Phase 2** (`src/hardware_logger.py`) ✅ — JSONL writer matching the README schema, throughput EMA (β=0.9, initialized at first instantaneous rate), peak memory via `torch.cuda.max_memory_allocated`, `scheduler_block()` context manager that accumulates `scheduler_overhead_seconds`. Extra fields like `event="reallocation"` and `rank_dict={...}` round-trip — Phase 5.3 relies on this.
-- **Phase 3** (`src/evaluate.py`) ✅ — `evaluate()` returning `{val_loss, val_accuracy}`, plus `TargetAccuracyTracker` recording the first step + wall-clock time at which `val_accuracy >= target` (locks on first crossing for fair time-to-quality across methods).
-- **Tests** under [src/tests/](src/tests/): `test_models.py`, `test_hardware_logger.py`, `test_evaluate.py` (~31 tests; all passing on the CUDA box, with one CPU-only peak-memory test correctly skipped).
-- **Demo notebook**: [notebooks/demo_phase_1.ipynb](notebooks/demo_phase_1.ipynb) — exercises Phase 1.1 + 1.2 end-to-end with a real DistilBERT forward pass on an SST-2 batch.
-- **Next: Phase 4a** — `src/lora_utils.py`: enumerate LoRA modules under PEFT (`peft.tuners.lora.Linear` walker), `lora_grad_norms` (Frobenius norm of A + B grads), `parameter_cost`, and `build_uniform_lora_model` / `build_non_uniform_lora_model` (the latter via `LoraConfig.rank_pattern`). Prerequisite for Phase 4b's `HardwareAwareRankAllocator`.
+- Phase 0 ✅ — scaffolding.
+- Phase 1.1 ✅ — `src/data.py`: SST-2 loader, tokenizer, `set_seed`, dataloaders.
+- Phase 1.2 ✅ — `src/models.py`: DistilBERT loader, `find_lora_target_module_names` (12 q/v_lin @ 768×768), `module_dims` (Phase 4b cost proxy), `count_parameters`.
+- Phase 2 ✅ — `src/hardware_logger.py`: JSONL writer, throughput EMA, peak memory via `torch.cuda.max_memory_allocated`, `scheduler_block()` ctx manager. Round-trips arbitrary fields (Phase 5.3 logs `event="reallocation"` + `rank_dict`).
+- Phase 3 ✅ — `src/evaluate.py`: `evaluate()` → `{val_loss, val_accuracy}`; `TargetAccuracyTracker` locks first crossing of `val_accuracy >= target`.
+- Phase 4a.1.A ✅ — `src/lora_utils.py`: `parameter_cost`, `enumerate_lora_modules`, `build_uniform_lora_model`.
+- Tests in [src/tests/](src/tests/) — all passing on CUDA box (one CPU-only test correctly skipped).
+- Demos: [notebooks/demo_phase_1.ipynb](notebooks/demo_phase_1.ipynb), `demo.py`, `demo_lora.py` at repo root.
+- **Next: Phase 4a.1.B** — `lora_grad_norms` (Frobenius A+B grads) and `build_non_uniform_lora_model` (`LoraConfig.rank_pattern`). Then Phase 4b allocator.
 
-When updating this section: replace, don't append. The reader needs to know what's true *now*.
+When updating: replace, don't append.
 
 ## How to work on this project
 
 ### Cadence
-Break each phase into the smallest sensible work units (one file, one config, one function group). After each unit:
-1. Stop and explain *exactly* what was implemented — file by file, function by function, with any non-obvious choice called out.
-2. Suggest a concrete way to inspect or exercise the new code right now (`python -c` import, `pytest -k …`, file:line pointer, smoke run).
-3. Wait for explicit "continue" / "next" before moving on.
-
-This applies *within* phases as well as between them.
+Smallest sensible work units (one file / function group). After each: stop, explain file-by-file with non-obvious choices called out, suggest a verify command, wait for explicit "continue". User prefers paste-ready `demo_X.py` files at repo root over multi-line `python -c "..."` blocks (shell escaping breaks on copy-paste).
 
 ### Workflow
-- **Solo project.** Commit and push directly to `main`. No PRs by default.
-- **Phase milestones**: tag with `git tag phase-N-complete && git push --tags`.
-- **Pushing is still a separate step** that needs the user's say-so — committing locally does not imply pushing.
-- **Don't auto-stage untracked files.** `git add <specific-file>`, never `git add .`.
+Solo project: commit + push directly to `main`, no PRs. Tag phase milestones (`git tag phase-N-complete && git push --tags`). Pushing requires user say-so. Use `git add <file>`, never `git add .`.
 
 ### Environments
-One repo, multiple venvs (one per machine). `requirements.txt` is cross-platform; upper bounds pin numpy/pyarrow/datasets into the only intersection that works on Windows + CUDA torch (see "Why the upper bounds" below).
+One repo, multiple venvs. `requirements.txt` is cross-platform; upper bounds pin **numpy<2 + pyarrow<15 + datasets<3** to avoid Windows DLL traps (see below).
 
-- **Mac dev venv** — `python3 -m venv .venv && pip install -r requirements.txt`. CPU-only Torch from PyPI. Activate with `source .venv/bin/activate`.
-- **Linux CUDA box** — same setup, CUDA Torch resolved automatically by pip on Linux.
-- **Windows CUDA box** (RTX 4070 Laptop, driver 581.x, CUDA 13 capable) — `python -m venv .venv` then activate via `source .venv/Scripts/activate` (Git Bash) or `.\.venv\Scripts\Activate.ps1` (PowerShell). The default PyPI torch wheel is **CPU-only on Windows**, so swap to the CUDA wheel after `pip install -r requirements.txt`:
+- **Mac dev venv** — `python3 -m venv .venv && pip install -r requirements.txt`. CPU-only torch from PyPI.
+- **Linux CUDA box** — same; CUDA torch resolves automatically.
+- **Windows CUDA box** (RTX 4070 Laptop, driver 581.x) — `python -m venv .venv` then `source .venv/Scripts/activate` (Git Bash). Default PyPI torch is CPU-only on Windows; swap after install:
   ```
   pip uninstall -y torch
   pip install torch --index-url https://download.pytorch.org/whl/cu124
   ```
-  Verified working: `torch 2.6.0+cu124`, `torch.cuda.is_available() == True`.
+  Verified: `torch 2.6.0+cu124`.
 
-#### Why the upper bounds in `requirements.txt`
-Three Windows pitfalls converge on `pyarrow` (datasets' native dep). The only triple that satisfies all three constraints simultaneously is **`numpy<2` + `pyarrow<15` + `datasets<3`** — pinned in `requirements.txt` so a fresh install lands inside the working envelope automatically:
-
-1. **`pyarrow ≥ 15` silently segfaults when torch is imported first** on Windows — a DLL load-order conflict (not OpenMP — `KMP_DUPLICATE_LIB_OK` does not help). Symptom: `python script.py` exits without a traceback partway through imports.
-2. **`pyarrow < 15` is incompatible with `numpy 2.x` ABI** — surfaces as `AttributeError: _ARRAY_API not found` / `ImportError: numpy.core.multiarray failed to import`.
-3. **`datasets ≥ 3` calls `pa.json_()`** which `pyarrow < 15` doesn't expose — surfaces as `AttributeError: module 'pyarrow' has no attribute 'json_'`.
-
-If any of those errors return on a fresh machine, check that the install actually respected the upper bounds: `pip show numpy pyarrow datasets`. The Mac and Linux venvs aren't affected by the DLL conflict, but they tolerate the older versions fine.
-
-#### Jupyter on Windows
-Even within the pinned envelope, the Jupyter kernel can segfault on `import torch` in a notebook (plain `python -c` works) due to duplicate OpenMP DLLs (`libiomp5md.dll`) when numpy/scipy were installed in a sequence that left two MKL bindings on PATH. Fix: `pip install --force-reinstall --no-deps numpy scipy`. Diagnostic-only bypass (don't commit): `KMP_DUPLICATE_LIB_OK=TRUE` before `jupyter lab`.
-
-#### Standalone scripts on Windows
-Any standalone Python entry point that uses DataLoader workers must be wrapped in `if __name__ == "__main__":` — Windows multiprocessing re-imports the script per worker, and without the guard the script either hangs or exits silently during DataLoader bootstrap. The `--smoke` flag in the planned `train.py` will set `num_workers=0` to side-step this, but ad-hoc demos need the guard.
+#### Windows gotchas
+- **The pyarrow triangle**: pyarrow≥15 silently segfaults when torch is imported first (DLL conflict; `KMP_DUPLICATE_LIB_OK` does *not* help). pyarrow<15 breaks numpy 2.x ABI (`_ARRAY_API not found`). datasets≥3 calls `pa.json_()` missing in pyarrow<15. Hence the triple pin. If symptoms return: `pip show numpy pyarrow datasets` to verify the pins held.
+- **Jupyter `import torch` segfault** (duplicate OpenMP DLLs): `pip install --force-reinstall --no-deps numpy scipy`. Bypass-only: `KMP_DUPLICATE_LIB_OK=TRUE`.
+- **Standalone scripts** with DataLoader workers must wrap entry in `if __name__ == "__main__":` — Windows re-imports per worker, otherwise the script silently hangs/exits. `--smoke` in `train.py` will use `num_workers=0`.
 
 ### Hardware target
-CUDA. Use `torch.cuda.max_memory_allocated()` as the peak-memory metric in `src/hardware_logger.py`. Don't write MPS/CPU fallback as the primary path. Smoke runs may execute on CPU; real experiments require CUDA.
+CUDA. Peak-memory metric is `torch.cuda.max_memory_allocated()`. No MPS/CPU fallback as primary path. Smoke runs may run CPU; real experiments require CUDA.
 
 ## Repo conventions
-
-- Configs are YAML in `configs/<method>_lora.yaml`. All four configs share `total_rank_budget: 96` — this is the **rank-budget invariant** for fair comparison and must not drift.
-- Run scripts in `experiments/` are thin wrappers: `python -m src.train --config configs/X.yaml --seed $1`.
-- Logs go to `results/raw_logs/<method>/<run_id>.jsonl` (append-only JSONL, schema in README §"hardware_logger.py").
-- Commit messages use a descriptive title and a body explaining *why*. Phase work is prefixed `Phase N.M:`.
-- LoRA target modules for DistilBERT: `q_lin`, `v_lin`. Document deviations.
+- Configs in `configs/<method>_lora.yaml`. All share `total_rank_budget: 96` — **invariant**, must not drift.
+- Run scripts: `python -m src.train --config configs/X.yaml --seed $1`.
+- Logs: `results/raw_logs/<method>/<run_id>.jsonl` (schema in README §"hardware_logger.py").
+- Commits: descriptive title + *why* in body. Phase work prefixed `Phase N.M:`.
+- LoRA targets for DistilBERT: `q_lin`, `v_lin`.
 
 ## Things to not do
-
-- Do not propose dynamic in-training rank reallocation before Phase 4's two-stage version is working — it's a Phase 7 stretch goal (README Risk 2).
-- Do not reimplement LoRA / AdaLoRA. Use PEFT's `LoraConfig`, `AdaLoraConfig`, `get_peft_model`.
-- Do not let the four methods diverge on optimizer, LR schedule, batch size, or max steps — fairness in Phase 5 depends on these being identical.
-- Do not claim "our method beats AdaLoRA." Frame as "explores whether hardware-aware allocation improves practical efficiency under constrained budgets" (README §"Final Notes").
+- No dynamic in-training rank reallocation before Phase 4's two-stage version works (Phase 7 stretch; README Risk 2).
+- Don't reimplement LoRA/AdaLoRA. Use PEFT (`LoraConfig`, `AdaLoraConfig`, `get_peft_model`).
+- Don't let the four methods diverge on optimizer / LR / batch size / max steps — Phase 5 fairness depends on it.
+- Don't claim beating AdaLoRA. Frame as "explores whether hardware-aware allocation improves practical efficiency under constrained budgets" (README §"Final Notes").
 
 ## Pointers
-
-- Project spec: [README.md](README.md)
-- Method configs: [configs/](configs/)
-- Run scripts: [experiments/](experiments/)
-- Source: [src/](src/) — `data.py` `models.py` `evaluate.py` `hardware_logger.py` (done); `lora_utils.py` `rank_allocator.py` `train.py` `metrics.py` (stubs).
-- Tests: [src/tests/](src/tests/) — one file per implemented module. Run with `python -m pytest src/tests -q` from the repo root.
-- Demo notebooks: [notebooks/](notebooks/) — `demo_phase_1.ipynb` shows the model loader and dataloader end-to-end. Re-run after each phase to watch progress (e.g. trainable param count drops sharply once Unit 4a.1 wraps the model with PEFT).
-- Results land in: [results/raw_logs/](results/raw_logs/), [results/figures/](results/figures/), [results/summaries/](results/summaries/)
+- Spec: [README.md](README.md). Plan: `~/.claude/plans/<slug>.md`.
+- Code: [src/](src/), [configs/](configs/), [experiments/](experiments/).
+- Tests: [src/tests/](src/tests/) — `python -m pytest src/tests -q` from repo root.
+- Demos: [notebooks/](notebooks/), `demo.py`, `demo_lora.py` (paste-ready files preferred).
+- Results: [results/raw_logs/](results/raw_logs/), [results/figures/](results/figures/), [results/summaries/](results/summaries/).
