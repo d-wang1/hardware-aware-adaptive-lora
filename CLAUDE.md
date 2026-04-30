@@ -17,8 +17,8 @@ Hardware-Aware Adaptive LoRA Rank Allocation. Distributes a fixed rank budget ac
 - Phase 4b ✅ — `src/rank_allocator.py`: `HardwareAwareRankAllocator` with EMA gradient scores (seeded at first observation), `parameter_cost`-based costs, `s_i = g_i / c_i^α`, and budget-preserving allocation (floor at min_rank → proportional split → cap at max_rank → deterministic 1-rank rebalance to exact budget). One-shot `allocate(peft_model)` for the warmup→stage-2 hand-off.
 - Tests in [src/tests/](src/tests/) — all passing on CUDA box (one CPU-only test correctly skipped).
 - Demos: [notebooks/demo_phase_1.ipynb](notebooks/demo_phase_1.ipynb), `demo.py`, `demo_lora.py`, `demo_lora_grads.py` at repo root.
-- Phase 5.1+5.2+5.3+5.5 ✅ — `src/train.py`: shared harness (`load_config`, `make_run_id`, `apply_smoke_overrides`, `build_optimizer_and_scheduler`, `train_loop`); `run_uniform`; `run_two_stage` for `hardware_aware` + `gradient_adaptive` (warmup with allocator hook → `scheduler_block`-charged reallocation → fresh-base-model stage 2 with `build_non_uniform_lora_model`); `--smoke` flag.
-- **Next: Phase 5.4** — AdaLoRA path via `peft.AdaLoraConfig`; wrap PEFT's `update_and_allocate(global_step)` in `logger.scheduler_block()` so its overhead is comparably attributed.
+- Phase 5 ✅ — `src/train.py`: shared harness (`load_config`, `make_run_id`, `apply_smoke_overrides`, `build_optimizer_and_scheduler`, `train_loop`); `run_uniform`; `run_two_stage` for `hardware_aware` + `gradient_adaptive` (warmup with allocator hook → `scheduler_block`-charged reallocation → fresh-base-model stage 2 with `build_non_uniform_lora_model`); `run_adalora` via `peft.AdaLoraConfig` with `update_and_allocate` plumbed through `train_loop`'s `post_step_hook` so its per-step cost is charged to `scheduler_overhead_seconds` (AdaLoRA's overhead is ~360× the two-stage methods' on the smoke baseline — the project's headline systems-level finding); `--smoke` flag works for all four methods.
+- **Next: Phase 6** — `src/metrics.py`: aggregate `results/raw_logs/**/*.jsonl` into the README's three tables (Statistical / Hardware / Systems Tradeoff) and figures (`val_accuracy_vs_walltime.png`, rank allocation heatmap, peak-memory bars).
 
 When updating: replace, don't append.
 
@@ -52,7 +52,7 @@ One repo, multiple venvs. `requirements.txt` is cross-platform; upper bounds pin
 CUDA. Peak-memory metric is `torch.cuda.max_memory_allocated()`. No MPS/CPU fallback as primary path. Smoke runs may run CPU; real experiments require CUDA.
 
 ### What `--smoke` is for
-Plumbing-only sanity: 5 total steps (2 warmup + 3 stage-2), 64/32 train/val samples, `num_workers=0`, `eval_interval=5`. Verifies the run produces a JSONL with the right schema. **Not** data-meaningful — gradient EMAs from 2 warmup steps are noise, val_accuracy hovers around chance, time-to-target is always `null`. Real experiments need the full configured `warmup_steps: 200` + `epochs: 3`.
+Plumbing-only sanity: 5 total steps, 64/32 train/val samples, `num_workers=0`, `eval_interval=5`. Per-method overrides: two-stage methods get `warmup_steps=2`; AdaLoRA gets `tinit=1, tfinal=1, deltaT=1` (PEFT requires `tinit + tfinal < total_step` for a non-empty budgeting phase). Verifies the run produces a JSONL with the right schema. **Not** data-meaningful — gradient EMAs from 2 warmup steps are noise, val_accuracy hovers around chance, time-to-target is always `null`. Real experiments need the full configured `warmup_steps: 200` + `epochs: 3`.
 
 ## Repo conventions
 - Configs in `configs/<method>_lora.yaml`. All share `total_rank_budget: 96` — **invariant**, must not drift.

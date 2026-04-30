@@ -204,6 +204,34 @@ def test_main_dispatches_gradient_adaptive_to_two_stage(monkeypatch):
     assert calls == ["gradient_adaptive"]
 
 
+def test_main_dispatches_adalora_to_run_adalora(monkeypatch):
+    """AdaLoRA path: same dispatch convention but a separate run function
+    because the per-step ``update_and_allocate`` hook lives only here."""
+    import src.train as t
+    calls: list[str] = []
+
+    def spy(cfg):
+        calls.append(cfg["method"])
+        return {}
+
+    monkeypatch.setattr(t, "run_adalora", spy)
+    t.main(["--config", "configs/adalora.yaml", "--smoke"])
+    assert calls == ["adalora"]
+
+
+def test_apply_smoke_overrides_includes_adalora_knobs():
+    """Smoke must override AdaLoRA's tinit/tfinal/deltaT — defaults of
+    200/1000/10 would never fire in 5 smoke steps and the AdaLoRA hook
+    would silently no-op."""
+    cfg = {"method": "adalora", "training": {"seed": 0}}
+    apply_smoke_overrides(cfg)
+    # PEFT requires tinit + tfinal < total_step (=5) so the budgeting phase
+    # has room. tinit=1, tfinal=1 leaves steps 1-3 for reallocation.
+    assert cfg["lora"]["tinit"] == 1
+    assert cfg["lora"]["tfinal"] == 1
+    assert cfg["lora"]["deltaT"] == 1
+
+
 def test_train_loop_calls_allocator_hook(tmp_path):
     """When an allocator is passed, ``update_gradient_scores`` must be invoked
     every step. This is the contract the two-stage flow (Phase 5.3) depends on."""
@@ -238,3 +266,36 @@ def test_train_loop_calls_allocator_hook(tmp_path):
             allocator=spy,
         )
     assert spy.calls == 4
+
+
+def test_train_loop_calls_post_step_hook_inside_scheduler_block(tmp_path):
+    """``post_step_hook`` is the AdaLoRA contract: invoked every step *after*
+    optimizer.step, inside ``logger.scheduler_block`` so its overhead lands
+    in ``scheduler_overhead_seconds``. The hook must receive the step number
+    (1-indexed; AdaLoRA's internal schedule is 1-indexed)."""
+    import time
+    torch.manual_seed(0)
+    model = _StubHF()
+    train_loader = _toy_loader(16)
+    val_loader = _toy_loader(8, seed=1)
+    optim, sched = build_optimizer_and_scheduler(
+        model, {"learning_rate": 1e-2}, total_steps=3
+    )
+
+    seen_steps: list[int] = []
+    def hook(global_step: int) -> None:
+        seen_steps.append(global_step)
+        time.sleep(0.005)  # measurable overhead so scheduler_block is non-zero
+
+    with HardwareLogger(tmp_path, method="stub", run_id="rh") as logger:
+        tracker = TargetAccuracyTracker(target=0.99)
+        train_loop(
+            model=model, optimizer=optim, scheduler=sched,
+            train_loader=train_loader, val_loader=val_loader,
+            logger=logger, tracker=tracker, device="cpu",
+            total_steps=3, eval_interval=3,
+            post_step_hook=hook,
+        )
+        assert seen_steps == [0, 1, 2]
+        # Scheduler overhead picked up the hook's sleeps (3 × 5ms ≈ 15ms).
+        assert logger.scheduler_overhead_seconds >= 0.010

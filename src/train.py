@@ -31,6 +31,8 @@ from transformers import get_linear_schedule_with_warmup
 from src.data import load_sst2, make_dataloaders, set_seed
 from src.evaluate import TargetAccuracyTracker, evaluate
 from src.hardware_logger import HardwareLogger
+from peft import AdaLoraConfig, TaskType, get_peft_model
+
 from src.lora_utils import build_non_uniform_lora_model, build_uniform_lora_model
 from src.models import (
     count_parameters,
@@ -71,6 +73,14 @@ def apply_smoke_overrides(cfg: dict[str, Any]) -> None:
     # Two-stage methods read warmup_steps; override here so the smoke flag is
     # method-agnostic. With max_steps=5 → 2 warmup + 3 stage-2.
     training["warmup_steps"] = 2
+    # AdaLoRA-specific knobs (default tinit=200/tfinal=1000/deltaT=10 would
+    # never fire in a 5-step smoke). PEFT requires tinit + tfinal < total_step
+    # so the budgeting phase has room (here: steps 1-3 reallocate, step 4 is
+    # the final-phase tail). Other methods ignore these keys.
+    lora = cfg.setdefault("lora", {})
+    lora["tinit"] = 1
+    lora["tfinal"] = 1
+    lora["deltaT"] = 1
 
 
 # --- optimizer / scheduler ---------------------------------------------
@@ -125,6 +135,7 @@ def train_loop(
     total_steps: int,
     eval_interval: int,
     allocator: Any | None = None,
+    post_step_hook: Any | None = None,
     start_step: int = 0,
 ) -> dict[str, float | int]:
     """Run ``total_steps`` optimizer steps, evaluating every ``eval_interval``.
@@ -134,9 +145,16 @@ def train_loop(
     step is always evaluated regardless of interval alignment so the run
     has a guaranteed last-row ``val_accuracy`` for Phase 6 aggregation.
 
-    ``allocator``: if provided, ``update_gradient_scores(model)`` is called
-    after ``loss.backward()`` and before ``optimizer.step()`` — that's the
-    only window where gradients exist on the LoRA parameters.
+    Two scheduling hooks, both charged to ``scheduler_overhead_seconds`` for
+    fair cross-method comparison:
+
+    * ``allocator.update_gradient_scores(model)`` — called between
+      ``loss.backward()`` and ``optimizer.step()`` (the only window where
+      LoRA gradients exist). Used by the two-stage methods.
+    * ``post_step_hook(global_step)`` — called after ``optimizer.step()`` /
+      ``scheduler.step()`` / ``zero_grad``. Used by AdaLoRA's
+      ``update_and_allocate``, which needs to inspect the *post-update*
+      weights to recompute importance.
     """
     model.train()
     step = start_step
@@ -154,10 +172,21 @@ def train_loop(
         loss.backward()
 
         if allocator is not None:
-            allocator.update_gradient_scores(model)
+            with logger.scheduler_block():
+                allocator.update_gradient_scores(model)
 
         optimizer.step()
         scheduler.step()
+
+        # AdaLoRA's update_and_allocate computes ``p * p.grad`` for importance
+        # scoring, so the hook must fire BEFORE zero_grad while gradients are
+        # still attached. zero_grad goes last; the next step's loss.backward()
+        # is the only consumer and it doesn't care which side of the loop the
+        # zero happened on.
+        if post_step_hook is not None:
+            with logger.scheduler_block():
+                post_step_hook(step)
+
         optimizer.zero_grad()
         logger.step_end(num_examples=batch["labels"].size(0))
         step += 1
@@ -437,6 +466,95 @@ def run_two_stage(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def run_adalora(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Train with PEFT's AdaLoRA — the strong adaptive baseline.
+
+    PEFT runs its own importance-based reallocation inside
+    ``update_and_allocate(global_step)``, called every step. We invoke that
+    via ``train_loop``'s ``post_step_hook`` so the call lands inside
+    ``logger.scheduler_block()`` — AdaLoRA's per-step overhead is then
+    attributed to ``scheduler_overhead_seconds`` the same way the two-stage
+    methods' allocator work is, making the cross-method comparison fair.
+
+    Budget is matched at the *target_r * n_modules* level rather than
+    init_r — AdaLoRA starts at higher init_r and prunes down. With 12
+    modules and target_r=8, the post-pruning budget matches uniform's 96.
+    """
+    set_seed(cfg["training"]["seed"])
+    device = _resolve_device()
+
+    base_model, tokenizer = load_model_and_tokenizer(
+        cfg["model"]["name"], num_labels=2
+    )
+    train_loader, val_loader = _build_loaders(cfg, tokenizer)
+
+    lora_cfg = cfg["lora"]
+    targets = list(lora_cfg["target_modules"])
+
+    training = cfg["training"]
+    max_steps = training.get("max_steps")
+    if max_steps is not None:
+        total_steps = int(max_steps)
+    else:
+        total_steps = int(training["epochs"]) * len(train_loader)
+
+    adalora_config = AdaLoraConfig(
+        init_r=int(lora_cfg["init_r"]),
+        target_r=int(lora_cfg["target_r"]),
+        tinit=int(lora_cfg["tinit"]),
+        tfinal=int(lora_cfg["tfinal"]),
+        deltaT=int(lora_cfg["deltaT"]),
+        beta1=float(lora_cfg["beta1"]),
+        beta2=float(lora_cfg["beta2"]),
+        lora_alpha=int(lora_cfg["alpha_lora"]),
+        lora_dropout=float(lora_cfg.get("dropout", 0.0)),
+        target_modules=targets,
+        total_step=total_steps,  # PEFT 0.19 uses this internally for the schedule
+        bias="none",
+        task_type=TaskType.SEQ_CLS,
+    )
+    peft_model = get_peft_model(base_model, adalora_config).to(device)
+
+    optimizer, scheduler = build_optimizer_and_scheduler(
+        peft_model, training, total_steps
+    )
+
+    run_id = make_run_id("adalora", training["seed"])
+    out_dir = cfg["logging"]["output_dir"]
+
+    def adalora_step_hook(global_step: int) -> None:
+        # PEFT's AdaLoRA uses 1-indexed steps internally; train_loop counts
+        # the just-completed step as ``step`` (post-increment), so passing
+        # ``global_step`` directly matches AdaLoRA's expectation.
+        peft_model.base_model.update_and_allocate(global_step)
+
+    with HardwareLogger(out_dir, method="adalora", run_id=run_id) as logger:
+        tracker = TargetAccuracyTracker(
+            target=float(cfg["logging"]["target_accuracy"])
+        )
+        last_eval = train_loop(
+            model=peft_model,
+            optimizer=optimizer, scheduler=scheduler,
+            train_loader=train_loader, val_loader=val_loader,
+            logger=logger, tracker=tracker, device=device,
+            total_steps=total_steps,
+            eval_interval=int(training["eval_interval"]),
+            post_step_hook=adalora_step_hook,
+        )
+        logger.log(
+            total_steps,
+            event="final",
+            train_loss=None,
+            val_loss=last_eval["val_loss"],
+            val_accuracy=last_eval["val_accuracy"],
+            trainable_parameters=count_parameters(peft_model, trainable_only=True),
+            steps_to_target_accuracy=tracker.steps_to_target,
+            wall_clock_to_target=tracker.wall_clock_to_target,
+        )
+
+    return {"run_id": run_id, "log_path": str(logger.path), **last_eval}
+
+
 # --- CLI ---------------------------------------------------------------
 
 
@@ -470,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
     elif method in {"hardware_aware", "gradient_adaptive"}:
         run_two_stage(cfg)
     elif method == "adalora":
-        raise NotImplementedError("method 'adalora' lands in Phase 5.4")
+        run_adalora(cfg)
     else:
         raise ValueError(f"unknown method: {method!r}")
     return 0
