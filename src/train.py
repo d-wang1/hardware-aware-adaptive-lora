@@ -31,12 +31,13 @@ from transformers import get_linear_schedule_with_warmup
 from src.data import load_sst2, make_dataloaders, set_seed
 from src.evaluate import TargetAccuracyTracker, evaluate
 from src.hardware_logger import HardwareLogger
-from src.lora_utils import build_uniform_lora_model
+from src.lora_utils import build_non_uniform_lora_model, build_uniform_lora_model
 from src.models import (
     count_parameters,
     find_lora_target_module_names,
     load_model_and_tokenizer,
 )
+from src.rank_allocator import HardwareAwareRankAllocator
 
 
 # --- config / id --------------------------------------------------------
@@ -67,6 +68,9 @@ def apply_smoke_overrides(cfg: dict[str, Any]) -> None:
     training["max_steps"] = 5
     training["eval_interval"] = 5
     training["epochs"] = 1
+    # Two-stage methods read warmup_steps; override here so the smoke flag is
+    # method-agnostic. With max_steps=5 → 2 warmup + 3 stage-2.
+    training["warmup_steps"] = 2
 
 
 # --- optimizer / scheduler ---------------------------------------------
@@ -286,6 +290,153 @@ def run_uniform(cfg: dict[str, Any]) -> dict[str, Any]:
     return {"run_id": run_id, "log_path": str(logger.path), **last_eval}
 
 
+def run_two_stage(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Two-stage warmup→reallocate→fine-tune for ``hardware_aware`` and
+    ``gradient_adaptive``. Both methods share this code path; the only
+    difference is ``allocator.alpha`` (read from ``allocator.hardware_alpha``).
+
+    Stage 1: build uniform LoRA at ``initial_rank``, run ``warmup_steps`` of
+    ``train_loop`` with the allocator hook engaged so EMA gradient scores
+    accumulate while the optimizer is also moving (warmup gradients reflect
+    *active* training dynamics, not just the gradient at init).
+
+    Reallocation: compute ``rank_dict`` inside ``logger.scheduler_block()`` so
+    the allocator's cost is honestly attributed to ``scheduler_overhead_seconds``,
+    matching how AdaLoRA's allocate-step will be wrapped in Phase 5.4. A
+    JSONL row with ``event="reallocation"`` carries the chosen ranks.
+
+    Stage 2: rebuild the base model from scratch (warmup LoRA weights are
+    discarded — README §"Two-Stage Version"), wrap with
+    ``build_non_uniform_lora_model(rank_dict)``, and re-create the optimizer
+    + scheduler around the new (different-shape) parameters. Run
+    ``train_loop`` for the remaining ``stage2_steps`` with ``allocator=None``.
+    """
+    method = cfg["method"]  # "hardware_aware" or "gradient_adaptive"
+    set_seed(cfg["training"]["seed"])
+    device = _resolve_device()
+
+    base_model_a, tokenizer = load_model_and_tokenizer(
+        cfg["model"]["name"], num_labels=2
+    )
+    train_loader, val_loader = _build_loaders(cfg, tokenizer)
+
+    lora_cfg = cfg["lora"]
+    targets = list(lora_cfg["target_modules"])
+    initial_rank = int(lora_cfg["initial_rank"])
+    alpha_lora = int(lora_cfg["alpha_lora"])
+    dropout = float(lora_cfg.get("dropout", 0.0))
+
+    # --- step accounting ----------------------------------------------------
+    training = cfg["training"]
+    max_steps = training.get("max_steps")
+    if max_steps is not None:
+        total_steps = int(max_steps)
+        # Smoke override or explicit max: warmup is half rounded down (≥1).
+        warmup_steps = int(training.get("warmup_steps", max(1, total_steps // 2)))
+    else:
+        total_steps = int(training["epochs"]) * len(train_loader)
+        warmup_steps = int(training["warmup_steps"])
+    stage2_steps = total_steps - warmup_steps
+    if warmup_steps < 1 or stage2_steps < 1:
+        raise ValueError(
+            f"need ≥1 step each in warmup ({warmup_steps}) and stage 2 "
+            f"({stage2_steps}); total={total_steps}"
+        )
+
+    # --- Stage 1: uniform LoRA + allocator EMA hook -------------------------
+    warmup_model = build_uniform_lora_model(
+        base_model_a, target_modules=targets,
+        rank=initial_rank, alpha=alpha_lora, dropout=dropout,
+    ).to(device)
+
+    allocator_cfg = cfg["allocator"]
+    allocator = HardwareAwareRankAllocator(
+        total_budget=int(lora_cfg["total_rank_budget"]),
+        min_rank=int(lora_cfg["min_rank"]),
+        max_rank=int(lora_cfg["max_rank"]),
+        alpha=float(allocator_cfg["hardware_alpha"]),
+        ema_beta=float(allocator_cfg["ema_beta"]),
+    )
+
+    stage1_optim, stage1_sched = build_optimizer_and_scheduler(
+        warmup_model, training, total_steps=warmup_steps
+    )
+
+    run_id = make_run_id(method, training["seed"])
+    out_dir = cfg["logging"]["output_dir"]
+
+    with HardwareLogger(out_dir, method=method, run_id=run_id) as logger:
+        tracker = TargetAccuracyTracker(
+            target=float(cfg["logging"]["target_accuracy"])
+        )
+        train_loop(
+            model=warmup_model,
+            optimizer=stage1_optim, scheduler=stage1_sched,
+            train_loader=train_loader, val_loader=val_loader,
+            logger=logger, tracker=tracker, device=device,
+            total_steps=warmup_steps,
+            eval_interval=int(training["eval_interval"]),
+            allocator=allocator,
+        )
+
+        # --- Reallocation (charge to scheduler_overhead) --------------------
+        with logger.scheduler_block():
+            rank_dict = allocator.allocate(warmup_model)
+        logger.log(
+            warmup_steps,
+            event="reallocation",
+            rank_dict=rank_dict,
+            gradient_scores=allocator.gradient_scores,
+            train_loss=None, val_loss=None, val_accuracy=None,
+        )
+
+        # Free Stage 1 state before allocating Stage 2 (helps on tight VRAM).
+        del warmup_model, stage1_optim, stage1_sched
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # --- Stage 2: non-uniform LoRA, fresh optimizer ---------------------
+        base_model_b, _ = load_model_and_tokenizer(
+            cfg["model"]["name"], num_labels=2
+        )
+        stage2_model = build_non_uniform_lora_model(
+            base_model_b, target_modules=targets,
+            rank_dict=rank_dict, alpha=alpha_lora, dropout=dropout,
+        ).to(device)
+        stage2_optim, stage2_sched = build_optimizer_and_scheduler(
+            stage2_model, training, total_steps=stage2_steps
+        )
+        last_eval = train_loop(
+            model=stage2_model,
+            optimizer=stage2_optim, scheduler=stage2_sched,
+            train_loader=train_loader, val_loader=val_loader,
+            logger=logger, tracker=tracker, device=device,
+            total_steps=stage2_steps,
+            eval_interval=int(training["eval_interval"]),
+            allocator=None,
+            start_step=warmup_steps,
+        )
+
+        logger.log(
+            total_steps,
+            event="final",
+            train_loss=None,
+            val_loss=last_eval["val_loss"],
+            val_accuracy=last_eval["val_accuracy"],
+            trainable_parameters=count_parameters(stage2_model, trainable_only=True),
+            steps_to_target_accuracy=tracker.steps_to_target,
+            wall_clock_to_target=tracker.wall_clock_to_target,
+            rank_dict=rank_dict,
+        )
+
+    return {
+        "run_id": run_id,
+        "log_path": str(logger.path),
+        "rank_dict": rank_dict,
+        **last_eval,
+    }
+
+
 # --- CLI ---------------------------------------------------------------
 
 
@@ -317,9 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     if method == "uniform":
         run_uniform(cfg)
     elif method in {"hardware_aware", "gradient_adaptive"}:
-        raise NotImplementedError(
-            f"method '{method}' lands in Phase 5.3 (two-stage adaptive)"
-        )
+        run_two_stage(cfg)
     elif method == "adalora":
         raise NotImplementedError("method 'adalora' lands in Phase 5.4")
     else:

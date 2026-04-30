@@ -17,7 +17,8 @@ Hardware-Aware Adaptive LoRA Rank Allocation. Distributes a fixed rank budget ac
 - Phase 4b ✅ — `src/rank_allocator.py`: `HardwareAwareRankAllocator` with EMA gradient scores (seeded at first observation), `parameter_cost`-based costs, `s_i = g_i / c_i^α`, and budget-preserving allocation (floor at min_rank → proportional split → cap at max_rank → deterministic 1-rank rebalance to exact budget). One-shot `allocate(peft_model)` for the warmup→stage-2 hand-off.
 - Tests in [src/tests/](src/tests/) — all passing on CUDA box (one CPU-only test correctly skipped).
 - Demos: [notebooks/demo_phase_1.ipynb](notebooks/demo_phase_1.ipynb), `demo.py`, `demo_lora.py`, `demo_lora_grads.py` at repo root.
-- **Next: Phase 5** — `src/train.py`: unified entry point dispatching on `config["method"]` ∈ {uniform, adalora, gradient_adaptive, hardware_aware}; two-stage warmup→reallocate→fine-tune for the adaptive methods; AdaLoRA via PEFT.
+- Phase 5.1+5.2+5.3+5.5 ✅ — `src/train.py`: shared harness (`load_config`, `make_run_id`, `apply_smoke_overrides`, `build_optimizer_and_scheduler`, `train_loop`); `run_uniform`; `run_two_stage` for `hardware_aware` + `gradient_adaptive` (warmup with allocator hook → `scheduler_block`-charged reallocation → fresh-base-model stage 2 with `build_non_uniform_lora_model`); `--smoke` flag.
+- **Next: Phase 5.4** — AdaLoRA path via `peft.AdaLoraConfig`; wrap PEFT's `update_and_allocate(global_step)` in `logger.scheduler_block()` so its overhead is comparably attributed.
 
 When updating: replace, don't append.
 

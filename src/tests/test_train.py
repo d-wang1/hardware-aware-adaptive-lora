@@ -52,6 +52,9 @@ def test_apply_smoke_overrides_clamps_training():
     assert t["eval_interval"] == 5
     assert t["epochs"] == 1
     assert t["num_workers"] == 0
+    # Two-stage methods need warmup_steps; smoke must set it so the same
+    # smoke flag works for hardware_aware / gradient_adaptive too.
+    assert t["warmup_steps"] == 2
     # Non-overridden keys preserved.
     assert t["batch_size"] == 32
     assert t["learning_rate"] == 2e-4
@@ -166,6 +169,39 @@ def test_train_loop_writes_jsonl_and_advances_optimizer(tmp_path):
         val_batch["labels"],
     ).item()
     assert after_loss < initial_loss_before, (after_loss, initial_loss_before)
+
+
+# --- main() dispatch -----------------------------------------------------
+
+
+def test_main_dispatches_hardware_aware_to_two_stage(monkeypatch):
+    """``main`` must route hardware_aware → run_two_stage. Spy on the
+    function to avoid touching DistilBERT in a unit test."""
+    import src.train as t
+    calls: list[str] = []
+
+    def spy(cfg):
+        calls.append(cfg["method"])
+        return {}
+
+    monkeypatch.setattr(t, "run_two_stage", spy)
+    t.main(["--config", "configs/hardware_aware_lora.yaml", "--smoke"])
+    assert calls == ["hardware_aware"]
+
+
+def test_main_dispatches_gradient_adaptive_to_two_stage(monkeypatch):
+    """gradient_adaptive shares the two-stage code path with hardware_aware
+    (only allocator alpha differs). Same dispatch contract."""
+    import src.train as t
+    calls: list[str] = []
+
+    def spy(cfg):
+        calls.append(cfg["method"])
+        return {}
+
+    monkeypatch.setattr(t, "run_two_stage", spy)
+    t.main(["--config", "configs/gradient_adaptive_lora.yaml", "--smoke"])
+    assert calls == ["gradient_adaptive"]
 
 
 def test_train_loop_calls_allocator_hook(tmp_path):
