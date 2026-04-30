@@ -1026,13 +1026,19 @@ model:
   task: sst2
 
 lora:
+  # Production targets attention + FFN so the allocator's cost
+  # denominator is non-trivial (1536 for q_lin/v_lin vs 3840 for
+  # lin1/lin2). Attention-only would make alpha=0 and alpha=1
+  # produce identical allocations.
   target_modules:
     - q_lin
     - v_lin
+    - lin1
+    - lin2
   initial_rank: 8
   min_rank: 2
   max_rank: 16
-  total_rank_budget: 96
+  total_rank_budget: 192    # 24 modules * uniform rank 8
   alpha: 1.0
 
 training:

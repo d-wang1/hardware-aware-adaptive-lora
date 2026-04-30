@@ -3,7 +3,9 @@
 Phase 4b core contribution. Pure-Python; no training-loop dependencies. The
 allocator is fed LoRA gradient norms once per step during a warmup stage,
 then asked to materialize a per-module rank dict that respects the
-project-wide ``total_rank_budget`` invariant (96 by default).
+project-wide ``total_rank_budget`` invariant (192 in production: 24
+DistilBERT LoRA modules × uniform rank 8). The allocator itself is
+budget-agnostic — pass any feasible (budget, min_rank, max_rank) triple.
 
 The allocation score is::
 

@@ -1,11 +1,18 @@
 """Pretrained model loading and LoRA target-module identification.
 
-DistilBERT's attention sub-layer exposes the LoRA target projections as
-`q_lin` and `v_lin` (HuggingFace's naming for query/value linear layers).
-For DistilBERT base these are 768 -> 768 and there are 6 transformer
-layers, giving 12 LoRA target modules total. That count is the divisor
-behind the project-wide rank budget invariant: total_rank_budget = 96
-distributes to a uniform rank of 8 per module.
+DistilBERT's attention exposes ``q_lin`` and ``v_lin`` (768→768) and its
+FFN exposes ``lin1`` (768→3072) and ``lin2`` (3072→768). The production
+config targets all four across 6 transformer layers = 24 LoRA modules,
+which sets the rank budget invariant: ``total_rank_budget = 192``
+distributes to a uniform rank of 8 per module. The mixed-cost target
+list (1536 for attention vs 3840 for FFN) is what makes the
+hardware-aware allocator's ``s_i = g_i / c_i^α`` non-trivial — see
+CLAUDE.md "Repo conventions".
+
+``find_lora_target_module_names`` defaults to ``("q_lin", "v_lin")``
+(historical; preserved for backward compatibility with attention-only
+test fixtures); production callers pass all four keywords explicitly
+through the YAML configs.
 """
 from __future__ import annotations
 

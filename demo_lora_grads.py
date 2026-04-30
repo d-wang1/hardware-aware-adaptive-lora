@@ -1,5 +1,14 @@
 """Demo for sub-unit 4a.1.B: lora_grad_norms + build_non_uniform_lora_model.
 
+Historical: this demo was written when LoRA targets were attention-only
+(``q_lin``, ``v_lin`` → 12 modules, budget 96). Production has since moved
+to attention + FFN (``q_lin``, ``v_lin``, ``lin1``, ``lin2`` → 24 modules,
+budget 192) — see CLAUDE.md "Repo conventions". This demo intentionally
+keeps the simpler attention-only setup because it's exercising the
+*plumbing* of 4a.1.B (enumerate / gradient / non-uniform-attach), not the
+production allocator setup. The numbers below (12 modules, 96 budget) are
+the demo's own arithmetic, not the project-wide invariant.
+
 Run from repo root:
 
     python demo_lora_grads.py
@@ -74,14 +83,16 @@ def main() -> None:
 
     print("\n=== 4. Build NON-uniform model from a synthetic rank_dict ===")
     # Pretend the allocator decided some modules need more rank than others.
-    # Total rank stays at the budget (12 modules * rank 8 = 96).
+    # Demo arithmetic only (12 modules * rank 8 = 96) — production budget
+    # is 192 across 24 modules; this demo intentionally targets attention
+    # only to keep the example tight.
     fqnames = sorted(enumerated.keys())
     # Give the first 6 modules rank=4 and the last 6 rank=12 -> sum = 24+72=96.
     rank_dict = {n: 4 for n in fqnames[:6]} | {n: 12 for n in fqnames[6:]}
     print(f"Rank dict (showing 4 entries):")
     for name, r in list(rank_dict.items())[:4]:
         print(f"  {name[-50:]:>50}  rank={r}")
-    print(f"sum(rank_dict.values()) = {sum(rank_dict.values())} (budget invariant: 96)")
+    print(f"sum(rank_dict.values()) = {sum(rank_dict.values())} (demo budget: 96)")
 
     # Need a fresh base model — get_peft_model mutates in place.
     base_again, _ = load_model_and_tokenizer(

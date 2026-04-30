@@ -477,8 +477,8 @@ def run_adalora(cfg: dict[str, Any]) -> dict[str, Any]:
     methods' allocator work is, making the cross-method comparison fair.
 
     Budget is matched at the *target_r * n_modules* level rather than
-    init_r — AdaLoRA starts at higher init_r and prunes down. With 12
-    modules and target_r=8, the post-pruning budget matches uniform's 96.
+    init_r — AdaLoRA starts at higher init_r and prunes down. With 24
+    modules and target_r=8, the post-pruning budget matches uniform's 192.
     """
     set_seed(cfg["training"]["seed"])
     device = _resolve_device()
