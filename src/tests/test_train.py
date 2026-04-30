@@ -30,10 +30,13 @@ from src.train import (
 
 
 def test_load_config_round_trips_real_yaml():
-    """The shipped configs must parse — they're consumed by train.main."""
+    """The shipped configs must parse — they're consumed by train.main.
+    Budget invariant: 24 modules (6 layers * 4 targets q_lin/v_lin/lin1/lin2)
+    * uniform rank 8 = 192."""
     cfg = load_config("configs/uniform_lora.yaml")
     assert cfg["method"] == "uniform"
-    assert cfg["lora"]["total_rank_budget"] == 96
+    assert cfg["lora"]["total_rank_budget"] == 192
+    assert sorted(cfg["lora"]["target_modules"]) == ["lin1", "lin2", "q_lin", "v_lin"]
 
 
 def test_make_run_id_format():
