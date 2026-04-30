@@ -43,24 +43,31 @@ One repo, multiple venvs. `requirements.txt` is cross-platform; upper bounds pin
   Verified: `torch 2.6.0+cu124`.
 
 #### Windows gotchas
-- **The pyarrow triangle**: pyarrow≥15 silently segfaults when torch is imported first (DLL conflict; `KMP_DUPLICATE_LIB_OK` does *not* help). pyarrow<15 breaks numpy 2.x ABI (`_ARRAY_API not found`). datasets≥3 calls `pa.json_()` missing in pyarrow<15. Hence the triple pin. If symptoms return: `pip show numpy pyarrow datasets` to verify the pins held.
+- **The pyarrow triangle**: pyarrow≥15 silently segfaults (exit 139) when torch is imported first (DLL conflict; `KMP_DUPLICATE_LIB_OK` does *not* help). pyarrow<15 breaks numpy 2.x ABI (`_ARRAY_API not found`). datasets≥3 calls `pa.json_()` missing in pyarrow<15. Hence the triple pin (`numpy<2 + pyarrow<15 + datasets<3`). Diagnose with `pip show numpy pyarrow datasets`.
+  - **Recovery — always use `--no-deps`** when reinstalling any one of the three; `pip install 'pyarrow<15' --force-reinstall` *without* `--no-deps` will pull in numpy 2.x as a build dep and break the other side. Working sequence: `pip install 'pyarrow<15' --force-reinstall --no-deps && pip install 'numpy<2' --force-reinstall --no-deps`.
 - **Jupyter `import torch` segfault** (duplicate OpenMP DLLs): `pip install --force-reinstall --no-deps numpy scipy`. Bypass-only: `KMP_DUPLICATE_LIB_OK=TRUE`.
 - **Standalone scripts** with DataLoader workers must wrap entry in `if __name__ == "__main__":` — Windows re-imports per worker, otherwise the script silently hangs/exits. `--smoke` in `train.py` will use `num_workers=0`.
 
 ### Hardware target
 CUDA. Peak-memory metric is `torch.cuda.max_memory_allocated()`. No MPS/CPU fallback as primary path. Smoke runs may run CPU; real experiments require CUDA.
 
+### What `--smoke` is for
+Plumbing-only sanity: 5 total steps (2 warmup + 3 stage-2), 64/32 train/val samples, `num_workers=0`, `eval_interval=5`. Verifies the run produces a JSONL with the right schema. **Not** data-meaningful — gradient EMAs from 2 warmup steps are noise, val_accuracy hovers around chance, time-to-target is always `null`. Real experiments need the full configured `warmup_steps: 200` + `epochs: 3`.
+
 ## Repo conventions
 - Configs in `configs/<method>_lora.yaml`. All share `total_rank_budget: 96` — **invariant**, must not drift.
 - Run scripts: `python -m src.train --config configs/X.yaml --seed $1`.
-- Logs: `results/raw_logs/<method>/<run_id>.jsonl` (schema in README §"hardware_logger.py").
+- Logs: `results/raw_logs/<method>/<run_id>.jsonl` (schema in README §"hardware_logger.py"). `run_id = <method>-seed<seed>-<utc-stamp>`; `HardwareLogger` opens append-mode, so multiple invocations with the same id concatenate (don't `cat *.jsonl` and treat as one run).
+- **Two-stage JSONL row order** (`hardware_aware`, `gradient_adaptive`): (1) eval at warmup endpoint, (2) `event="reallocation"` carrying `rank_dict` + `gradient_scores`, (3) per-eval-interval rows in stage 2, (4) `event="final"` summary (also re-carries `rank_dict` for convenience). Phase 6 aggregation can read `rank_dict` from either the reallocation row or the final row.
 - Commits: descriptive title + *why* in body. Phase work prefixed `Phase N.M:`.
 - LoRA targets for DistilBERT: `q_lin`, `v_lin`.
 
 ## Things to not do
 - No dynamic in-training rank reallocation before Phase 4's two-stage version works (Phase 7 stretch; README Risk 2).
 - Don't reimplement LoRA/AdaLoRA. Use PEFT (`LoraConfig`, `AdaLoraConfig`, `get_peft_model`).
-- Don't let the four methods diverge on optimizer / LR / batch size / max steps — Phase 5 fairness depends on it.
+- Don't let the four methods diverge on optimizer / LR / batch size / max steps — `build_optimizer_and_scheduler` + `train_loop` in `src/train.py` are single-source by design; Phase 5 fairness depends on it.
+- Don't "optimize" the stage-2 base-model reload in `run_two_stage` — it's intentional per README §"Two-Stage Version" (warmup LoRA weights are *discarded*; stage 2 starts from fresh base + non-uniform LoRA).
+- Don't add real-DistilBERT integration tests to the unit suite — the convention (set in `test_lora_utils` + `test_train`) is fast unit tests + out-of-band verification via `python -m src.train ... --smoke`.
 - Don't claim beating AdaLoRA. Frame as "explores whether hardware-aware allocation improves practical efficiency under constrained budgets" (README §"Final Notes").
 
 ## Pointers
