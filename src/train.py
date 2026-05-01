@@ -83,6 +83,27 @@ def apply_smoke_overrides(cfg: dict[str, Any]) -> None:
     lora["deltaT"] = 1
 
 
+# --- run-config provenance ---------------------------------------------
+
+
+def _log_run_config(logger: HardwareLogger, cfg: dict[str, Any]) -> None:
+    """Write a one-time ``event="config"`` row carrying the resolved ``cfg``.
+
+    Phase 6's metrics reader uses this to recover per-run knobs (notably
+    ``cfg["allocator"]["hardware_alpha"]`` for the α-sweep ablation) without
+    having to guess the source yaml from the run_id. Step is 0: this row
+    fires before any training step. ``logger.log`` auto-fills schema columns
+    with ``None`` so train_loss/val_loss/val_accuracy do not need to be
+    passed here.
+    """
+    logger.log(
+        0,
+        event="config",
+        config=cfg,
+        seed=cfg["training"]["seed"],
+    )
+
+
 # --- optimizer / scheduler ---------------------------------------------
 
 
@@ -288,6 +309,7 @@ def run_uniform(cfg: dict[str, Any]) -> dict[str, Any]:
     out_dir = cfg["logging"]["output_dir"]
 
     with HardwareLogger(out_dir, method="uniform", run_id=run_id) as logger:
+        _log_run_config(logger, cfg)
         tracker = TargetAccuracyTracker(
             target=float(cfg["logging"]["target_accuracy"])
         )
@@ -395,6 +417,7 @@ def run_two_stage(cfg: dict[str, Any]) -> dict[str, Any]:
     out_dir = cfg["logging"]["output_dir"]
 
     with HardwareLogger(out_dir, method=method, run_id=run_id) as logger:
+        _log_run_config(logger, cfg)
         tracker = TargetAccuracyTracker(
             target=float(cfg["logging"]["target_accuracy"])
         )
@@ -529,6 +552,7 @@ def run_adalora(cfg: dict[str, Any]) -> dict[str, Any]:
         peft_model.base_model.update_and_allocate(global_step)
 
     with HardwareLogger(out_dir, method="adalora", run_id=run_id) as logger:
+        _log_run_config(logger, cfg)
         tracker = TargetAccuracyTracker(
             target=float(cfg["logging"]["target_accuracy"])
         )

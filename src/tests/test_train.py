@@ -18,6 +18,7 @@ from src.evaluate import TargetAccuracyTracker
 from src.hardware_logger import HardwareLogger
 from src.train import (
     _cycle,
+    _log_run_config,
     apply_smoke_overrides,
     build_optimizer_and_scheduler,
     load_config,
@@ -269,6 +270,42 @@ def test_train_loop_calls_allocator_hook(tmp_path):
             allocator=spy,
         )
     assert spy.calls == 4
+
+
+def test_log_run_config_emits_event_config_row(tmp_path):
+    """Phase 6.7 contract: every dispatcher writes one ``event="config"``
+    row before training starts. Phase 6's metrics reader extracts per-run
+    knobs (notably ``allocator.hardware_alpha`` for the α-sweep) from this
+    row, so it must round-trip the full cfg + the seed."""
+    import json
+
+    cfg = {
+        "method": "hardware_aware",
+        "training": {"seed": 7, "epochs": 3, "batch_size": 32,
+                     "learning_rate": 2e-4, "eval_interval": 100,
+                     "warmup_steps": 200},
+        "lora": {"total_rank_budget": 192, "min_rank": 2, "max_rank": 16,
+                 "initial_rank": 8, "alpha_lora": 16,
+                 "target_modules": ["q_lin", "v_lin", "lin1", "lin2"]},
+        "allocator": {"hardware_alpha": 0.5, "ema_beta": 0.9},
+        "logging": {"output_dir": "results/raw_logs", "target_accuracy": 0.9},
+    }
+    with HardwareLogger(tmp_path, method="hardware_aware", run_id="rcfg") as logger:
+        _log_run_config(logger, cfg)
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "rcfg.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["event"] == "config"
+    assert row["step"] == 0
+    assert row["seed"] == 7
+    # Whole cfg round-trips so metrics reader can pull alpha without re-loading yaml.
+    assert row["config"]["allocator"]["hardware_alpha"] == 0.5
+    assert row["config"]["lora"]["total_rank_budget"] == 192
 
 
 def test_train_loop_calls_post_step_hook_inside_scheduler_block(tmp_path):
