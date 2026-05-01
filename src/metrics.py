@@ -156,8 +156,44 @@ def parse_run_jsonl(path: Path) -> RunRecord:
     )
 
 
+def _dedupe_runs(records: list[RunRecord]) -> list[RunRecord]:
+    """For runs sharing ``(method, seed, alpha)``, keep only the
+    lexicographically latest ``run_id`` and warn about the rest.
+
+    Duplicates usually mean the same configuration was re-run (e.g. a
+    pre-sweep verification + the sweep itself, both at seed=42). Including
+    both biases the mean/std for that variant. ``run_id`` ends with a UTC
+    timestamp so lexicographic sort = chronological sort.
+    """
+    by_key: dict[tuple[str, int, float | None], list[RunRecord]] = {}
+    for rec in records:
+        key = (rec.method, rec.seed, rec.alpha)
+        by_key.setdefault(key, []).append(rec)
+
+    out: list[RunRecord] = []
+    for key, group in by_key.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        group.sort(key=lambda r: r.run_id)
+        kept = group[-1]
+        out.append(kept)
+        for stale in group[:-1]:
+            warnings.warn(
+                f"de-duplicating {stale.run_id}: keeping {kept.run_id} "
+                f"(both have method={key[0]}, seed={key[1]}, alpha={key[2]})",
+                RuntimeWarning, stacklevel=2,
+            )
+    return out
+
+
 def load_run_records(logs_dir: Path) -> list[RunRecord]:
-    """Walk ``logs_dir`` recursively, returning one record per readable run."""
+    """Walk ``logs_dir`` recursively, returning one record per readable run.
+
+    Files without an ``event="config"`` row are skipped with a warning.
+    Runs sharing ``(method, seed, alpha)`` are de-duped (latest kept) so
+    pre-sweep verification runs don't poison the aggregation.
+    """
     records: list[RunRecord] = []
     for path in sorted(Path(logs_dir).rglob("*.jsonl")):
         try:
@@ -166,7 +202,7 @@ def load_run_records(logs_dir: Path) -> list[RunRecord]:
             warnings.warn(
                 f"skipping {path}: {exc}", RuntimeWarning, stacklevel=2
             )
-    return records
+    return _dedupe_runs(records)
 
 
 # --- variant grouping ---------------------------------------------------

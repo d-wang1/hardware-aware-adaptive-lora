@@ -269,6 +269,51 @@ def test_parse_run_jsonl_rejects_missing_final_row(tmp_path):
         parse_run_jsonl(p)
 
 
+def test_load_run_records_dedupes_by_method_seed_alpha(tmp_path):
+    """Two runs at the same (method, seed, alpha) — e.g. a pre-sweep
+    verification run + the sweep's own seed=42 run for the same method —
+    must dedupe to one record. The lexicographically latest run_id wins
+    (run_id ends with UTC timestamp so this is chronological)."""
+    base = tmp_path / "raw_logs"
+    # Two runs, same method+seed+alpha, different timestamps in run_id.
+    early = base / "uniform" / "uniform-seed42-20260430T120000Z.jsonl"
+    late = base / "uniform" / "uniform-seed42-20260501T120000Z.jsonl"
+    _write_run(early, "uniform", seed=42, final_val_accuracy=0.85)
+    _write_run(late, "uniform", seed=42, final_val_accuracy=0.92)
+    # Plus a different seed so we can confirm dedupe is per-(method,seed),
+    # not global.
+    _write_run(
+        base / "uniform" / "uniform-seed43-20260501T130000Z.jsonl",
+        "uniform", seed=43, final_val_accuracy=0.91,
+    )
+    with pytest.warns(RuntimeWarning, match="de-duplicating"):
+        records = load_run_records(base)
+    # 2 runs survive: the late seed=42 + the seed=43.
+    assert len(records) == 2
+    accs = {(r.seed, r.final_val_accuracy) for r in records}
+    assert accs == {(42, 0.92), (43, 0.91)}
+
+
+def test_load_run_records_does_not_dedupe_across_alpha(tmp_path):
+    """hardware_aware at α=0.5 and α=1.0 share the same (method, seed) but
+    have different alpha. They are different variants and must not collapse."""
+    base = tmp_path / "raw_logs"
+    _write_run(
+        base / "hardware_aware" / "hardware_aware-seed42-alpha1.jsonl",
+        "hardware_aware", seed=42, alpha=1.0, final_val_accuracy=0.92,
+        rank_dict=_attn_skewed_rank_dict(),
+    )
+    _write_run(
+        base / "hardware_aware" / "hardware_aware-seed42-alpha05.jsonl",
+        "hardware_aware", seed=42, alpha=0.5, final_val_accuracy=0.91,
+        rank_dict=_attn_skewed_rank_dict(),
+    )
+    records = load_run_records(base)
+    assert len(records) == 2
+    alphas = sorted(r.alpha for r in records)
+    assert alphas == [0.5, 1.0]
+
+
 def test_load_run_records_skips_broken_files_with_warning(tmp_path):
     base = tmp_path / "raw_logs"
     _write_run(base / "uniform" / "good.jsonl", "uniform", 42)
