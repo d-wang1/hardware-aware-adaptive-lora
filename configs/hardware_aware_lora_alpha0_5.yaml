@@ -1,0 +1,40 @@
+method: hardware_aware
+
+model:
+  name: distilbert-base-uncased
+  task: sst2
+
+lora:
+  target_modules:
+    - q_lin
+    - v_lin
+    - lin1
+    - lin2
+  initial_rank: 8
+  min_rank: 2
+  max_rank: 16
+  total_rank_budget: 192
+  alpha_lora: 16
+  dropout: 0.0
+
+allocator:
+  hardware_alpha: 0.5       # α-sweep midpoint between gradient-only (0.0) and full hardware (1.0)
+  ema_beta: 0.9
+  cost_proxy: parameter
+
+training:
+  batch_size: 32
+  learning_rate: 2.0e-4
+  epochs: 3
+  warmup_steps: 200
+  eval_interval: 100
+  seed: 42
+
+hardware:
+  log_memory: true
+  log_wall_clock: true
+  log_examples_per_second: true
+
+logging:
+  output_dir: results/raw_logs/hardware_aware
+  target_accuracy: 0.90
