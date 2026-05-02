@@ -41,26 +41,36 @@
 \printAffiliationsAndNotice{}
 
 \begin{abstract}
-Low-rank adaptation (LoRA) reduces the number of trainable parameters
-needed to fine-tune a transformer, but once the total rank budget is
-fixed, \emph{how} that budget is distributed across modules becomes its
-own decision. Standard LoRA splits it uniformly; AdaLoRA reallocates it
-during training by SVD-pruning singular values. Neither accounts for the
-fact that the same unit of rank costs different numbers of trainable
-parameters at different modules. We study a simple allocator that mixes
-gradient-based importance with explicit per-rank parameter cost,
-$s_i = g_i / c_i^{\alpha}$, applied once at a warmup-to-stage-2 transition
-and held fixed thereafter. On SST-2 with DistilBERT under a fixed
-$192$-rank budget, the allocator reaches the lowest trainable-parameter
-count of any method evaluated ($1{,}081{,}346$ vs.\ AdaLoRA's
-$1{,}366{,}562$), comparable accuracy with the lowest seed-to-seed
-variance, and a $\sim$$19\times$ reduction in scheduler overhead relative
-to AdaLoRA. An $\alpha$-sweep ($0.0 \to 0.5 \to 1.0$) shows attention rank
-share growing monotonically from $39.1\%$ to $56.1\%$ at constant
-gradient signal, providing direct evidence that the cost term reshapes
-allocation independent of the importance proxy. The picture against
-Uniform LoRA is mixed --- peak memory and time-to-target favor Uniform
-on this task --- which we report rather than retune.
+Parameter-efficient fine-tuning methods like LoRA allow the adaptation
+of large language models under tight hardware and memory budgets.
+However, standard LoRA allocates the same rank uniformly across all
+adapted layers, ignoring the fact that the same unit of rank costs
+different numbers of trainable parameters at different modules. We
+study whether mixing the gradient-based importance signal with explicit
+per-rank parameter cost can produce a more efficient allocation under a
+fixed total rank budget. Specifically, we propose a lightweight
+two-stage allocator that warms up a uniform-rank model, then
+redistributes a fixed budget once across layers using a score
+$s_i = g_i / c_i^{\alpha}$ that combines an EMA of LoRA gradient norms
+$g_i$ with the per-rank parameter cost $c_i$. Compared with more
+complex adaptive methods like AdaLoRA, this approach is simpler to
+implement and runs its allocation step exactly once per training run.
+We evaluate on SST-2 with DistilBERT against Uniform LoRA, AdaLoRA, and
+a gradient-only ablation ($\alpha{=}0$), reporting validation accuracy
+and loss, time to a $0.90$ accuracy target, peak GPU memory,
+throughput, and scheduler overhead. At a fixed $192$-rank budget, the
+hardware-aware variant ($\alpha{=}1$) reaches the lowest
+trainable-parameter count of any method evaluated ($1{,}081{,}346$
+vs.\ AdaLoRA's $1{,}366{,}562$), comparable accuracy with the lowest
+seed-to-seed variance ($\pm 0.001$ over three seeds), and a
+$\sim$$19\times$ reduction in scheduler overhead relative to AdaLoRA
+($4.0$\,s vs.\ $76.7$\,s). An $\alpha$-sweep ($0.0 \to 0.5 \to 1.0$)
+shows attention rank share growing monotonically from $39.1\%$ to
+$56.1\%$ at constant gradient signal, providing direct evidence that
+the cost term reshapes allocation independent of the importance proxy.
+The picture against Uniform LoRA is mixed --- peak memory and
+time-to-target favor Uniform on this task --- which we report rather
+than retune.
 \end{abstract}
 
 \section{Introduction}
