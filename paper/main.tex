@@ -189,7 +189,7 @@ future work.
        warmup steps $W$, total steps $T$
 \STATE Build LoRA model with uniform rank $B/n$ over $n$ targets
 \STATE Initialise $g_i \leftarrow \perp$ for each target
-\FOR{$t = 1$ \TO $W$}
+\FOR{$t = 1$ to $W$}
    \STATE Forward, backward, update $g_i$ via Frobenius EMA
    \STATE Optimiser step
 \ENDFOR
@@ -199,7 +199,7 @@ future work.
        $r_{\min} \le r_i \le r_{\max}$
 \STATE Reload base model; build LoRA with \texttt{rank\_pattern}
        $= \{r_i\}$
-\FOR{$t = W{+}1$ \TO $T$}
+\FOR{$t = W{+}1$ to $T$}
    \STATE Forward, backward, optimiser step
 \ENDFOR
 \end{algorithmic}
