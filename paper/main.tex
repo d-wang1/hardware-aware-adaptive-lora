@@ -164,22 +164,25 @@ improvements.
 \label{sec:related}
 
 \textbf{LoRA} \cite{hu2022lora} introduced low-rank adapter
-fine-tuning with uniform rank. \textbf{AdaLoRA} \cite{zhang2023adalora}
-adaptively budgets rank across modules using an SVD-based importance
-score, pruning unimportant components throughout training. The
-proposed method differs in two ways: the importance signal is a
-Frobenius-norm gradient EMA rather than an SVD criterion, and that
-signal is explicitly divided by per-rank parameter cost. \textbf{LoRA+} \cite{hayou2024loraplus}
-addresses a different axis (separate learning rates for the $A$ and $B$
-factors) and is orthogonal to budget allocation. \textbf{QLoRA}
-\cite{dettmers2023qlora} composes LoRA with 4-bit quantisation of the
-base model, again orthogonal to rank distribution. \textbf{GaLore}
-\cite{zhao2024galore} projects optimiser state, not adapter capacity,
-onto a low-rank subspace; it tackles the memory cost of full-parameter
-training rather than the allocation question this project addresses.
-I am not aware of any published LoRA variant that uses an explicit
-per-rank parameter- or activation-cost denominator in its importance
-score.
+fine-tuning, in which every adapted layer receives the same fixed
+rank. \textbf{AdaLoRA} \cite{zhang2023adalora} extends LoRA by
+adaptively budgeting rank across modules using an SVD-based importance
+score, and prunes unimportant components over the course of training.
+The method proposed in this paper differs from AdaLoRA in two main
+ways: the importance signal is a Frobenius-norm gradient EMA rather
+than an SVD-based criterion, and that signal is explicitly divided by
+the per-rank parameter cost of each module. \textbf{LoRA+}
+\cite{hayou2024loraplus} addresses a different aspect of LoRA training,
+namely the use of separate learning rates for the $A$ and $B$ factors,
+and is essentially orthogonal to the question of budget allocation.
+\textbf{QLoRA} \cite{dettmers2023qlora} composes LoRA with 4-bit
+quantization of the base model, which is again orthogonal to how rank
+is distributed across layers. \textbf{GaLore} \cite{zhao2024galore}
+instead projects the optimizer state itself onto a low-rank subspace,
+addressing the memory cost of full-parameter training rather than the
+rank allocation question that this project studies. To my knowledge,
+no previously published LoRA variant uses an explicit per-rank
+parameter- or activation-cost denominator in its importance score.
 
 \section{Method}
 \label{sec:method}
@@ -187,43 +190,50 @@ score.
 \subsection{Allocator rule}
 \label{sec:method-rule}
 
-Let $\theta_i = (A_i, B_i)$ be the LoRA parameters at target module $i$,
-with $A_i \in \mathbb{R}^{r \times d_i^{\text{in}}}$ and
-$B_i \in \mathbb{R}^{d_i^{\text{out}} \times r}$. During warmup an
-EMA over the Frobenius gradient norm is maintained:
+Let $\theta_i = (A_i, B_i)$ denote the LoRA parameters at target module
+$i$, with $A_i \in \mathbb{R}^{r \times d_i^{\text{in}}}$ and
+$B_i \in \mathbb{R}^{d_i^{\text{out}} \times r}$. During the warmup
+phase, an exponential moving average of the Frobenius gradient norm is
+maintained for each module:
 \begin{equation}
 g_i^{(t)} \;=\; \beta\, g_i^{(t-1)} \;+\; (1-\beta)
    \bigl(\|\nabla_{A_i} \mathcal{L}\|_F + \|\nabla_{B_i} \mathcal{L}\|_F\bigr),
 \end{equation}
-seeded at the first observation rather than at zero. The per-rank
-parameter cost
+where the average is seeded at the first observation rather than at
+zero in order to avoid an initial bias toward small values. The
+per-rank parameter cost
 \begin{equation}
 c_i \;=\; d_i^{\text{in}} + d_i^{\text{out}}
 \end{equation}
-is exact for a single rank added to module $i$. The score
-$s_i = g_i / c_i^{\alpha}$ is then mapped to integer ranks by a
-budget-preserving allocator that floors at $r_{\min}$, distributes the
-remaining budget proportionally to $s_i$, caps at $r_{\max}$, and
-deterministically rebalances $\pm 1$ per step until $\sum_i r_i = B$
-exactly.
+gives the exact number of trainable parameters added by a single unit
+of rank at module $i$. The combined score $s_i = g_i / c_i^{\alpha}$
+is then mapped to integer ranks by a budget-preserving allocator that
+first floors each $r_i$ at $r_{\min}$, then distributes the remaining
+budget across modules in proportion to $s_i$, caps each $r_i$ at
+$r_{\max}$, and finally rebalances by $\pm 1$ deterministically until
+$\sum_i r_i = B$ exactly.
 
 \subsection{Two-stage training}
 \label{sec:method-twostage}
 
-Stage 1 trains a uniform-rank LoRA model for $W$ warmup steps,
-accumulating $g_i$ via the hook above. At the warmup-to-stage-2
-transition the allocator runs once inside an instrumented timing block
-whose wall-clock is recorded as a separate scheduler-overhead metric.
-The warmup LoRA weights are then \emph{discarded}: stage 2 rebuilds
-the LoRA model from a fresh base with non-uniform per-module ranks set
-from the allocator's output, then trains to completion on the same
-hyperparameters as stage 1. The intent of warmup is to surface gradient
-signal, not to pre-train weights.
+Stage 1 trains a uniform-rank LoRA model for $W$ warmup steps and
+accumulates $g_i$ through the gradient hook described above. At the
+boundary between warmup and stage 2, the allocator is run once inside
+an instrumented timing block whose wall-clock is recorded as a
+separate scheduler-overhead metric. The warmup LoRA weights are then
+discarded entirely: stage 2 rebuilds the LoRA model from a fresh copy
+of the base, this time with non-uniform per-module ranks taken from
+the allocator's output, and trains to completion using the same
+hyperparameters as stage 1. The reason for keeping warmup short is
+that its purpose is to surface a usable gradient signal for the
+allocator, not to pre-train the adapter weights themselves.
 
-A dynamic in-training variant --- re-running the allocator periodically
-rather than once --- is out of scope. Resizing rank mid-training would
-require reshaping the optimiser state of every adapter and is left to
-future work.
+A dynamic in-training variant of this scheme, in which the allocator
+is re-run periodically rather than only once, is out of scope for this
+project. Resizing rank mid-training would require reshaping the
+optimizer state of every adapter, which adds a layer of implementation
+complexity that runs against the simplicity goal stated in the
+introduction. A dynamic version is therefore left as future work.
 
 \begin{algorithm}[t]
 \caption{Hardware-Aware Two-Stage LoRA}
@@ -233,10 +243,10 @@ future work.
        $r_{\min}$, $r_{\max}$, $\alpha$, EMA decay $\beta$,
        warmup steps $W$, total steps $T$
 \STATE Build LoRA model with uniform rank $B/n$ over $n$ targets
-\STATE Initialise $g_i \leftarrow \perp$ for each target
+\STATE Initialize $g_i \leftarrow \perp$ for each target
 \FOR{$t = 1$ to $W$}
    \STATE Forward, backward, update $g_i$ via Frobenius EMA
-   \STATE Optimiser step
+   \STATE Optimizer step
 \ENDFOR
 \STATE Begin scheduler-overhead timing block:
 \STATE \quad Compute $s_i = g_i / c_i^{\alpha}$
@@ -245,7 +255,7 @@ future work.
 \STATE End timing block
 \STATE Reload base model; build LoRA with non-uniform ranks $\{r_i\}$
 \FOR{$t = W{+}1$ to $T$}
-   \STATE Forward, backward, optimiser step
+   \STATE Forward, backward, optimizer step
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
@@ -276,7 +286,7 @@ attributable to using more trainable parameters.
 ($\alpha{=}0$), Hardware-Aware LoRA ($\alpha{=}1$). The $\alpha$-sweep
 ablation additionally includes $\alpha{=}0.5$.
 
-\textbf{Shared.} Identical optimiser (AdamW), learning rate
+\textbf{Shared.} Identical optimizer (AdamW), learning rate
 ($2 \times 10^{-4}$), batch size (32), maximum steps (3 epochs), and
 training loop for all methods, enforced by a single dispatcher.
 AdaLoRA's per-step \texttt{update\_and\_allocate} hook is timed under
@@ -398,7 +408,7 @@ and AdaLoRA at $964$\,MB, but Hardware-Aware reaches $1208$\,MB and
 Gradient-Adaptive $1211$\,MB. Both two-stage methods carry
 $\sim$$250$\,MB more peak memory than Uniform despite Hardware-Aware
 using fewer parameters. \texttt{torch.cuda.max\_memory\_allocated}
-reflects activation and optimiser-state peaks during training, not
+reflects activation and optimizer-state peaks during training, not
 parameter count alone; rank concentrating on attention grows those
 layers' $A$/$B$ factors and their activation footprint along the
 forward/backward pass. The cost function $c_i = d_i^{\text{in}} +
@@ -551,7 +561,7 @@ uninformativeness or insufficient warmup signal.
 
 \begin{itemize}
 \item \textbf{Single task and single model.} SST-2 with DistilBERT-base
-      only. Whether the allocator's behaviour generalises to multi-class
+      only. Whether the allocator's behavior generalizes to multi-class
       GLUE tasks or to RoBERTa- or Llama-class models is not validated
       here.
 \item \textbf{Two-stage one-shot reallocation only.} A dynamic
