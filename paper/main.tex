@@ -79,37 +79,42 @@ task.
 \section{Introduction}
 \label{sec:intro}
 
-The continued scaling of transformer-based language models has driven
-considerable interest in parameter-efficient fine-tuning, of which
+The growing scale of transformer-based language models has motivated
+active research on parameter-efficient fine-tuning methods, of which
 Low-Rank Adaptation (LoRA) \cite{hu2022lora} is one of the most widely
-adopted methods. LoRA freezes the pretrained weights and inserts
-trainable rank-$r$ adapters of the form $\Delta W = BA$ into selected
-linear layers, drastically reducing the number of parameters that must
-be updated during fine-tuning. However, once the total rank budget
-$B = \sum_i r_i$ has been fixed, an additional design question
-surfaces: how should that budget be distributed among the adapted
-modules? The standard formulation of LoRA answers this by simply
-setting every $r_i$ to the same value. AdaLoRA
-\cite{zhang2023adalora} answers it dynamically, redistributing rank
-throughout training by pruning the SVD components that contribute the
-least to the loss. Both approaches treat rank as if it were fungible
-across the model --- that is, as if a single rank applied at one
-module costs the same as a single rank applied at any other.
+adopted. LoRA freezes the pretrained weights of the model and inserts
+small trainable adapters of the form $\Delta W = BA$ into selected
+linear layers, where $A \in \mathbb{R}^{r \times d}$ and
+$B \in \mathbb{R}^{k \times r}$ are factors of rank $r$. By only
+updating these adapters during fine-tuning, LoRA drastically reduces
+the number of trainable parameters and the associated GPU memory
+footprint, which makes it especially appealing in low-resource
+settings. However, once the total rank budget $B = \sum_i r_i$ has
+been fixed, there is still an additional design decision to be made:
+how the budget should be distributed across the modules being adapted.
+The standard formulation of LoRA addresses this by simply assigning
+the same rank to every layer. More sophisticated methods such as
+AdaLoRA \cite{zhang2023adalora} instead reallocate rank dynamically
+during training by pruning the SVD components that contribute the
+least to the loss. In both cases, rank is treated as if it were
+fungible across the model, meaning that a single unit of rank added
+at one module costs the same as a single unit added at another.
 
-This treatment is, in practice, an oversimplification. On
+In practice, this treatment is an oversimplification. On
 DistilBERT \cite{sanh2019distilbert}, adding one unit of rank to a
 $768 \to 3072$ feed-forward projection introduces $2.5\times$ as many
-trainable parameters as adding the same rank to a $768 \to 768$
-attention projection. When the underlying constraint is parameter
-count, GPU memory, or some closely related compute cost, charging
-both modules the same ``rank price'' is a clear modeling shortcut. It
-is therefore worth asking whether a rank allocator that explicitly
-incorporates this cost asymmetry can produce more efficient
-configurations under a constrained training budget.
+trainable parameters as adding the same unit of rank to a
+$768 \to 768$ attention projection. When the underlying constraint is
+parameter count, GPU memory, or some closely related compute cost,
+charging both modules the same ``rank price'' is therefore a clear
+simplification. It is reasonable to ask whether a rank allocator that
+explicitly takes this cost asymmetry into account could produce more
+efficient configurations under fixed hardware constraints.
 
-This paper studies a small but explicit change to the LoRA rank
-allocation rule: scale the gradient-based importance signal by the
-inverse of the per-rank parameter cost. For each LoRA target module $i$,
+This paper studies a small but explicit modification to the LoRA rank
+allocation rule, in which the gradient-based importance signal at
+each module is scaled by the inverse of the per-rank parameter cost of
+that module. For each LoRA target module $i$,
 \begin{equation}
 s_i \;=\; \frac{g_i}{c_i^{\alpha}},
 \label{eq:rule}
@@ -119,39 +124,41 @@ norms collected during a brief warmup phase,
 $c_i = d_i^{\text{in}} + d_i^{\text{out}}$ is the per-rank parameter
 cost at module $i$, and $\alpha \in [0, 1]$ controls how strongly the
 cost term is weighted. Ranks are then assigned across modules in
-proportion to $s_i$ while the total budget is preserved. Setting
-$\alpha = 0$ collapses the rule to a gradient-only allocator and serves
-as the ablation baseline; $\alpha = 1$ is the headline hardware-aware
-variant studied throughout this paper.
+proportion to $s_i$ while the total budget is preserved. When
+$\alpha = 0$, the rule collapses to a purely gradient-based allocator,
+which serves as the ablation baseline; when $\alpha = 1$, the score
+becomes the headline hardware-aware variant studied throughout this
+paper.
 
-I evaluate the resulting allocator on SST-2 sentiment
-classification \cite{socher2013sst, wang2018glue} using DistilBERT,
-comparing against Uniform LoRA, AdaLoRA \cite{zhang2023adalora} (via
-the PEFT implementation~\cite{mangrulkar2022peft}), and the
-$\alpha = 0$ gradient-only ablation. The contributions of this work
-are threefold:
+I evaluate the resulting allocator on the SST-2 sentiment
+classification task \cite{socher2013sst, wang2018glue} using
+DistilBERT, comparing against Uniform LoRA,
+AdaLoRA \cite{zhang2023adalora} (via the PEFT
+implementation~\cite{mangrulkar2022peft}), and the $\alpha = 0$
+gradient-only ablation. The contributions of this project are
+threefold:
 \begin{itemize}
-\item the allocation rule in Eq.~\ref{eq:rule}, together with a
+\item the allocation rule in Eq.~\ref{eq:rule}, along with a
       budget-preserving discrete allocator that distributes integer
       ranks under fixed minimum and maximum constraints
       (\S\ref{sec:method});
 \item a systems-level evaluation that reports peak GPU memory,
-      training throughput, total wall-clock, time-to-target, and
-      \emph{scheduler overhead} --- the last of which surfaces as
+      training throughput, total wall-clock time, time-to-target,
+      and scheduler overhead, with scheduler overhead surfacing as
       the clearest systems-level finding of this evaluation
       (\S\ref{sec:results-systems});
-\item an $\alpha$-sweep that isolates the cost term, demonstrating
-      that it monotonically reshapes the share of rank assigned to
-      attention versus feed-forward modules while final accuracy and
-      the upstream gradient signal are both held essentially fixed
+\item an $\alpha$-sweep that isolates the cost term and demonstrates
+      how it monotonically reshapes the share of rank assigned to
+      attention versus feed-forward modules, while final accuracy
+      and the upstream gradient signal remain essentially unchanged
       (\S\ref{sec:results-alpha}).
 \end{itemize}
-This paper makes no claim of universally outperforming AdaLoRA in
-final accuracy. Rather, the goal is to characterize the practical
-efficiency tradeoffs that emerge once a hardware-cost term is
-introduced into an otherwise simple allocator, and to identify the
-conditions under which the proposed rule does, or does not, deliver
-useful systems-level improvements.
+This paper does not claim to universally outperform AdaLoRA in final
+accuracy. Rather, the goal is to characterize the practical efficiency
+tradeoffs that result from introducing a hardware-cost term into an
+otherwise simple allocator, and to identify the conditions under which
+the proposed rule does or does not deliver useful systems-level
+improvements.
 
 \section{Related Work}
 \label{sec:related}
