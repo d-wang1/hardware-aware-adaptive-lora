@@ -41,38 +41,39 @@
 \printAffiliationsAndNotice{}
 
 \begin{abstract}
-Parameter-efficient fine-tuning methods such as LoRA have become a
-standard tool for adapting large language models under tight memory and
-compute budgets. However, the standard formulation of LoRA assigns the
-same rank to every adapted layer, despite the fact that a single unit
-of rank costs a different number of trainable parameters at each
-module. This work studies whether folding an explicit per-rank
-parameter cost into the rank allocation rule yields a more efficient
-distribution of a fixed total budget. Specifically, we propose a
-lightweight two-stage allocator that first trains a uniform-rank model
-during a brief warmup phase, then assigns ranks across layers a single
-time using a score $s_i = g_i / c_i^{\alpha}$ --- where $g_i$ tracks
-an exponential moving average of the LoRA gradient norms at module $i$
-and $c_i$ is the per-rank parameter cost at the same module. As opposed
-to more elaborate adaptive schemes like AdaLoRA, this approach is
-straightforward to implement and runs its allocation step only once
-per training run. We compare the proposed method against Uniform LoRA,
-AdaLoRA, and a gradient-only ablation ($\alpha{=}0$) on SST-2 with
-DistilBERT, reporting validation accuracy and loss, time to a $0.90$
-accuracy target, peak GPU memory, training throughput, and scheduler
-overhead. Under a fixed $192$-rank budget, the hardware-aware variant
-($\alpha{=}1$) achieves the lowest trainable-parameter count of any
-method considered ($1{,}081{,}346$ vs.\ AdaLoRA's $1{,}366{,}562$),
-comparable validation accuracy with the lowest seed-to-seed variance
-($\pm 0.001$ over three seeds), and roughly a $19\times$ reduction in
-scheduler overhead compared with AdaLoRA ($4.0$\,s vs.\ $76.7$\,s).
-An $\alpha$-sweep across $0.0$, $0.5$, and $1.0$ further reveals the
-share of rank assigned to attention modules climbing from $39.1\%$ to
-$56.1\%$ while the gradient signal is held fixed, suggesting that the
-cost term genuinely reshapes the allocation rather than merely tracking
-gradient magnitude. The picture against Uniform LoRA is somewhat more
-mixed --- peak memory and time-to-target favor Uniform on this task
---- which we report as observed rather than retune.
+Parameter-efficient fine-tuning methods like LoRA allow the adaptation
+of large language models under tighter hardware and memory limitations.
+However, standard LoRA allocates the same rank uniformly across all
+adapted layers. This project studies whether a variable rank allocation
+approach could be more effectively used under fixed hardware
+constraints. Specifically, I experiment with a lightweight adaptive
+LoRA method that, after a brief warmup phase, reallocates a fixed total
+rank budget across layers a single time using a score
+$s_i = g_i / c_i^{\alpha}$ that combines the gradient norms of LoRA
+parameters with the per-rank parameter cost of each module. As opposed
+to more complex adaptive budget allocation methods like those proposed
+in papers like AdaLoRA, this approach is designed to be easy to
+implement and operate explicitly under a fixed single-GPU budget. I
+compare the proposed method against the standard uniform-rank LoRA,
+AdaLoRA, and a gradient-only ablation ($\alpha{=}0$) on the SST-2
+sentiment classification task by both statistical and hardware metrics.
+Statistical metrics used include validation loss, validation accuracy,
+and time to a $0.90$ accuracy target, and hardware evaluation includes
+peak GPU usage, training throughput, scheduler overhead, and
+wall-clock time. The goal of this project is to determine if a
+low-overhead adaptive allocation rule can improve the quality and
+efficiency of LoRA under low-resource constraints. The proposed method,
+evaluated at $\alpha{=}1$, reaches the lowest trainable-parameter count
+of any method considered ($1{,}081{,}346$ vs.\ AdaLoRA's
+$1{,}366{,}562$), comparable accuracy with the lowest seed-to-seed
+variance ($\pm 0.001$ over three seeds), and roughly a $19\times$
+reduction in scheduler overhead relative to AdaLoRA. An $\alpha$-sweep
+further shows the share of rank assigned to attention modules climbing
+from $39.1\%$ to $56.1\%$ as $\alpha$ increases from $0.0$ to $1.0$,
+suggesting that the hardware-cost term meaningfully reshapes the
+allocation. The picture against uniform-rank LoRA is more mixed, with
+peak memory and time-to-target favoring the uniform baseline on this
+task.
 \end{abstract}
 
 \section{Introduction}
@@ -120,10 +121,10 @@ cost at module $i$, and $\alpha \in [0, 1]$ controls how strongly the
 cost term is weighted. Ranks are then assigned across modules in
 proportion to $s_i$ while the total budget is preserved. Setting
 $\alpha = 0$ collapses the rule to a gradient-only allocator and serves
-as our ablation baseline; $\alpha = 1$ is the headline hardware-aware
-variant we study throughout the paper.
+as the ablation baseline; $\alpha = 1$ is the headline hardware-aware
+variant studied throughout this paper.
 
-We evaluate the resulting allocator on SST-2 sentiment
+I evaluate the resulting allocator on SST-2 sentiment
 classification \cite{socher2013sst, wang2018glue} using DistilBERT,
 comparing against Uniform LoRA, AdaLoRA \cite{zhang2023adalora} (via
 the PEFT implementation~\cite{mangrulkar2022peft}), and the
@@ -136,8 +137,9 @@ are threefold:
       (\S\ref{sec:method});
 \item a systems-level evaluation that reports peak GPU memory,
       training throughput, total wall-clock, time-to-target, and
-      \emph{scheduler overhead} --- the last of which surfaces as our
-      clearest systems-level finding (\S\ref{sec:results-systems});
+      \emph{scheduler overhead} --- the last of which surfaces as
+      the clearest systems-level finding of this evaluation
+      (\S\ref{sec:results-systems});
 \item an $\alpha$-sweep that isolates the cost term, demonstrating
       that it monotonically reshapes the share of rank assigned to
       attention versus feed-forward modules while final accuracy and
@@ -157,19 +159,20 @@ useful systems-level improvements.
 \textbf{LoRA} \cite{hu2022lora} introduced low-rank adapter
 fine-tuning with uniform rank. \textbf{AdaLoRA} \cite{zhang2023adalora}
 adaptively budgets rank across modules using an SVD-based importance
-score, pruning unimportant components throughout training. Our method
-differs in two ways: the importance signal is a Frobenius-norm gradient
-EMA rather than an SVD criterion, and we explicitly divide that signal
-by per-rank parameter cost. \textbf{LoRA+} \cite{hayou2024loraplus}
+score, pruning unimportant components throughout training. The
+proposed method differs in two ways: the importance signal is a
+Frobenius-norm gradient EMA rather than an SVD criterion, and that
+signal is explicitly divided by per-rank parameter cost. \textbf{LoRA+} \cite{hayou2024loraplus}
 addresses a different axis (separate learning rates for the $A$ and $B$
 factors) and is orthogonal to budget allocation. \textbf{QLoRA}
 \cite{dettmers2023qlora} composes LoRA with 4-bit quantisation of the
 base model, again orthogonal to rank distribution. \textbf{GaLore}
 \cite{zhao2024galore} projects optimiser state, not adapter capacity,
 onto a low-rank subspace; it tackles the memory cost of full-parameter
-training rather than the allocation question we address. To our
-knowledge no published LoRA variant uses an explicit per-rank parameter-
-or activation-cost denominator in its importance score.
+training rather than the allocation question this project addresses.
+I am not aware of any published LoRA variant that uses an explicit
+per-rank parameter- or activation-cost denominator in its importance
+score.
 
 \section{Method}
 \label{sec:method}
@@ -179,8 +182,8 @@ or activation-cost denominator in its importance score.
 
 Let $\theta_i = (A_i, B_i)$ be the LoRA parameters at target module $i$,
 with $A_i \in \mathbb{R}^{r \times d_i^{\text{in}}}$ and
-$B_i \in \mathbb{R}^{d_i^{\text{out}} \times r}$. During warmup we
-maintain an EMA over the Frobenius gradient norm:
+$B_i \in \mathbb{R}^{d_i^{\text{out}} \times r}$. During warmup an
+EMA over the Frobenius gradient norm is maintained:
 \begin{equation}
 g_i^{(t)} \;=\; \beta\, g_i^{(t-1)} \;+\; (1-\beta)
    \bigl(\|\nabla_{A_i} \mathcal{L}\|_F + \|\nabla_{B_i} \mathcal{L}\|_F\bigr),
@@ -322,8 +325,8 @@ Hardware-Aware shows the lowest seed-to-seed variance ($\pm 0.001$ over
 three seeds) and the highest mean accuracy. AdaLoRA produces the lowest
 validation loss ($0.268$) but does not cross the $0.90$ accuracy
 threshold in any of three seeds within three epochs, while the other
-three methods cross it in all three. We report this factually without
-further causal claim.
+three methods cross it in all three. This is reported as observed
+without further causal claim.
 
 \subsection{Hardware performance}
 \label{sec:results-hw}
@@ -382,7 +385,7 @@ all run at $\sim$$920$ examples/s, while AdaLoRA runs at $602$~ex/s ---
 a $\sim$$35\%$ throughput penalty attributable to its per-step
 \texttt{update\_and\_allocate} work.
 
-Peak memory tells the opposite story to the one we expected from the
+Peak memory tells the opposite story to the one expected from the
 parameter counts (Fig.~\ref{fig:peakmem}). Uniform sits at $949$\,MB
 and AdaLoRA at $964$\,MB, but Hardware-Aware reaches $1208$\,MB and
 Gradient-Adaptive $1211$\,MB. Both two-stage methods carry
@@ -391,7 +394,7 @@ using fewer parameters. \texttt{torch.cuda.max\_memory\_allocated}
 reflects activation and optimiser-state peaks during training, not
 parameter count alone; rank concentrating on attention grows those
 layers' $A$/$B$ factors and their activation footprint along the
-forward/backward pass. Our cost function $c_i = d_i^{\text{in}} +
+forward/backward pass. The cost function $c_i = d_i^{\text{in}} +
 d_i^{\text{out}}$ does not currently model activation memory --- a
 direction for follow-up rather than a closed story.
 
@@ -430,7 +433,7 @@ structural and would widen with longer training.}
 \end{figure}
 
 The scheduler-overhead column of Table~\ref{tab:systems} is the
-clearest systems-level finding in our evaluation. Hardware-Aware's reallocator
+clearest systems-level finding in this evaluation. Hardware-Aware's reallocator
 runs once at the warmup-to-stage-2 transition and costs
 $\mathbf{4.0 \pm 0.13}$\,s of wall-clock, while AdaLoRA's runs every
 training step and accumulates to $\mathbf{76.7 \pm 0.33}$\,s ---
@@ -523,8 +526,8 @@ data.
 two-stage variants.} Hardware-Aware ($\alpha{=}1$) and Gradient-Adaptive
 ($\alpha{=}0$) end at $0.904$--$0.906$ because they allocate among the
 same set of gradient-signal-rich modules and differ only in the
-proportions. If the cost penalty reached \texttt{attn.q\_lin}, we would
-expect a larger accuracy delta in either direction; its absence is
+proportions. If the cost penalty reached \texttt{attn.q\_lin}, a larger
+accuracy delta would be expected in either direction; its absence is
 consistent with redistribution-within-shortlist rather than
 expansion-of-shortlist.
 
@@ -545,12 +548,12 @@ uninformativeness or insufficient warmup signal.
       GLUE tasks or to RoBERTa- or Llama-class models is not validated
       here.
 \item \textbf{Two-stage one-shot reallocation only.} A dynamic
-      in-training variant is deferred. We do not know whether
-      continuous reallocation would close the time-to-target gap with
-      Uniform LoRA on this task.
+      in-training variant is deferred. Whether continuous reallocation
+      would close the time-to-target gap with Uniform LoRA on this
+      task is unclear.
 \item \textbf{Three seeds.} Too few to support paired significance
-      testing. We report mean $\pm$ standard deviation and let the
-      reader judge.
+      testing. Mean $\pm$ standard deviation are reported and the
+      reader is left to judge.
 \item \textbf{Mixed practical-efficiency picture vs.\ Uniform.}
       Hardware-Aware uses fewer trainable parameters and achieves the
       lowest seed variance, but Uniform LoRA reaches the $0.90$ target
@@ -564,7 +567,7 @@ uninformativeness or insufficient warmup signal.
       follow-up.
 \item \textbf{Multiplicative penalty cannot rescue near-zero gradient
       signal.} As \S\ref{sec:results-skew} shows, \texttt{attn.q\_lin}
-      stays low-rank across every $\alpha$ we tested because its $g_i$
+      stays low-rank across every $\alpha$ tested because its $g_i$
       is small; no value of $\alpha$ can route rank to a module with
       no learning signal. An additive variant would behave differently.
 \end{itemize}
@@ -584,7 +587,7 @@ not deliver an across-the-board practical-efficiency win over Uniform
 LoRA on this task, with peak memory and time-to-target as the headline
 tradeoffs.
 
-Our method explores whether hardware-aware rank allocation can improve
+This project explores whether hardware-aware rank allocation can improve
 practical efficiency compared with AdaLoRA under constrained training
 budgets. The evidence presented here supports a sharpened version of
 that claim: the cost term shifts \emph{where} rank goes among modules
