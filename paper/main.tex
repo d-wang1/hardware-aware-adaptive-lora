@@ -4,6 +4,13 @@
 % \usepackage{icml2025} for the anonymous submission version.
 \usepackage[accepted]{icml2025}
 
+% Suppress the "Proceedings of the 42nd ICML ... PMLR 267, 2025 ..."
+% copyright notice that [accepted] mode prints at the bottom of page 1.
+% Affiliation footnote and correspondence line still render normally.
+\makeatletter
+\renewcommand{\Notice@String}{}
+\makeatother
+
 \usepackage{microtype}
 \usepackage{graphicx}
 \usepackage{booktabs}
