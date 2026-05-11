@@ -68,7 +68,7 @@ def test_build_optimizer_and_scheduler_warmup_fraction():
 
 
 class _StubHF(nn.Module):
-    """Mimics an HF classifier: forward(**batch) -> SimpleNamespace(logits, loss)."""
+    # HF-shaped classifier: forward(**batch) -> SimpleNamespace(logits, loss)
 
     def __init__(self, in_dim: int = 4, num_labels: int = 2):
         super().__init__()

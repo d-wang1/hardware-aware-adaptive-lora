@@ -55,7 +55,6 @@ def _write_run(
     rank_dict: dict[str, int] | None = None,
     eval_curve: list[tuple[int, float, float, float]] | None = None,
 ) -> None:
-    """Write a JSONL log file in the schema produced by HardwareLogger + src.train."""
     path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     cfg: dict = {

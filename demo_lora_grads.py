@@ -1,10 +1,3 @@
-"""Quick CPU walkthrough of LoRA enumeration + gradient + non-uniform attach.
-
-Targets attention-only (q_lin, v_lin) so the demo arithmetic stays simple:
-12 modules * rank 8 = 96. Production uses q/v/lin1/lin2 = 24 modules, budget 192.
-
-Run from repo root: python demo_lora_grads.py
-"""
 from __future__ import annotations
 
 import torch

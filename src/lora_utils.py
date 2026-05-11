@@ -15,7 +15,6 @@ def parameter_cost(in_dim: int, out_dim: int) -> int:
 
 
 def enumerate_lora_modules(peft_model: PeftModel) -> dict[str, dict]:
-    """Walk a PEFT model and return per-target {A, B, in_dim, out_dim, rank}."""
     out: dict[str, dict] = {}
     for fqname, module in peft_model.named_modules():
         if not isinstance(module, LoraLinear):
@@ -59,8 +58,7 @@ def build_uniform_lora_model(
 
 
 def lora_grad_norms(peft_model: PeftModel) -> dict[str, float]:
-    """{fqname: ||grad(A)||_F + ||grad(B)||_F}; modules with no grad yet return 0."""
-    # sum A and B norms because either alone undercounts how much the bottleneck moves
+    # sum A and B norms; either alone undercounts how much the bottleneck moves
     out: dict[str, float] = {}
     for fqname, info in enumerate_lora_modules(peft_model).items():
         a, b = info["A"], info["B"]
@@ -78,7 +76,6 @@ def build_non_uniform_lora_model(
     dropout: float = 0.0,
     task_type: TaskType | str | None = TaskType.SEQ_CLS,
 ) -> PeftModel:
-    """Wrap base_model with per-module ranks via LoraConfig.rank_pattern."""
     if not rank_dict:
         raise ValueError(
             "rank_dict is empty; pass at least one module->rank entry"

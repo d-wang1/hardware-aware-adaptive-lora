@@ -1,4 +1,3 @@
-"""Aggregate JSONL training logs into result tables and figures."""
 from __future__ import annotations
 
 import argparse
@@ -43,7 +42,6 @@ class RunRecord:
 
 
 def parse_run_jsonl(path: Path) -> RunRecord:
-    """Read one run's JSONL into a RunRecord. Raises if config or final row missing."""
     with path.open(encoding="utf-8") as fh:
         rows = [json.loads(line) for line in fh if line.strip()]
     if not rows:
@@ -121,7 +119,7 @@ def parse_run_jsonl(path: Path) -> RunRecord:
 
 
 def _dedupe_runs(records: list[RunRecord]) -> list[RunRecord]:
-    """For runs sharing (method, seed, alpha) keep the latest run_id."""
+    # for runs sharing (method, seed, alpha), keep the latest run_id
     # run_id ends with a UTC stamp so lexicographic sort == chronological
     by_key: dict[tuple[str, int, float | None], list[RunRecord]] = {}
     for rec in records:
@@ -255,7 +253,7 @@ def _csv_escape(s: str) -> str:
 
 
 def write_table(rows: list[list[str]], out_csv: Path, out_md: Path) -> None:
-    """Write the same table to out_csv and out_md. rows[0] is the header."""
+    # rows[0] is the header
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     out_md.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", encoding="utf-8") as f:
@@ -332,7 +330,7 @@ def systems_tradeoff_table(
 
 
 def _attn_share(rec: RunRecord) -> float | None:
-    """Fraction of total rank assigned to attention modules (q_lin / v_lin)."""
+    # fraction of total rank assigned to attention modules (q_lin / v_lin)
     if rec.rank_dict is None:
         return None
     attn = sum(
@@ -379,7 +377,6 @@ _PRIMARY_COLORS = {
 def figure_val_accuracy_vs_walltime(
     records: list[RunRecord], out_path: Path
 ) -> None:
-    """One faded line per seed + one solid mean line per method."""
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -440,7 +437,7 @@ def _short_module_name(fqname: str) -> str:
 def figure_rank_allocation_heatmap(
     records: list[RunRecord], out_path: Path
 ) -> None:
-    """Module x variant matrix of mean rank. AdaLoRA row blank (no rank_dict in log)."""
+    # AdaLoRA row stays blank: no rank_dict in its log
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -506,7 +503,6 @@ def figure_metric_bars(
     ylabel: str,
     out_path: Path,
 ) -> None:
-    """Bar chart of one per-run scalar metric across the four primary methods."""
     import matplotlib.pyplot as plt
     import numpy as np
 

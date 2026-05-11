@@ -13,7 +13,7 @@ from src.evaluate import TargetAccuracyTracker, evaluate
 
 
 class _LabelEchoClassifier(nn.Module):
-    """Returns logits whose argmax equals input_ids[:, 0]."""
+    # logits whose argmax equals input_ids[:, 0]
 
     def __init__(self, num_classes: int = 2):
         super().__init__()

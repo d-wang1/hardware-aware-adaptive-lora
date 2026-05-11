@@ -25,7 +25,6 @@ SCHEMA_FIELDS: tuple[str, ...] = (
 
 
 class HardwareLogger:
-    """Append-only JSONL writer with throughput / peak-memory / overhead probes."""
 
     def __init__(
         self,

@@ -1,5 +1,3 @@
-"""Training entry point. Dispatches on cfg["method"]:
-{uniform, adalora, gradient_adaptive, hardware_aware}."""
 from __future__ import annotations
 
 import argparse
@@ -39,7 +37,6 @@ def make_run_id(method: str, seed: int) -> str:
 
 
 def apply_smoke_overrides(cfg: dict[str, Any]) -> None:
-    """Clamp data + step counts so a run finishes in seconds on CPU."""
     training = cfg.setdefault("training", {})
     training["max_train_samples"] = 64
     training["max_val_samples"] = 32
@@ -57,7 +54,6 @@ def apply_smoke_overrides(cfg: dict[str, Any]) -> None:
 
 
 def _log_config(logger: HardwareLogger, cfg: dict[str, Any]) -> None:
-    """Emit one event="config" row at step 0 with the resolved cfg + seed."""
     logger.log(
         0,
         event="config",
@@ -71,7 +67,6 @@ def build_optimizer_and_scheduler(
     training_cfg: dict[str, Any],
     total_steps: int,
 ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]:
-    """AdamW + linear warmup over 6% of total steps, then linear decay."""
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=float(training_cfg["learning_rate"]),
@@ -105,7 +100,6 @@ def train_loop(
     post_step_hook: Any | None = None,
     start_step: int = 0,
 ) -> dict[str, float | int]:
-    """Run total_steps optimizer steps, eval every eval_interval and on the last."""
     model.train()
     step = start_step
     end_step = start_step + total_steps
@@ -179,7 +173,6 @@ def _build_loaders(
 
 
 def run_uniform(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Uniform-rank LoRA baseline. No allocator, no two-stage."""
     set_seed(cfg["training"]["seed"])
     device = _resolve_device()
 
@@ -257,10 +250,6 @@ def run_uniform(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_two_stage(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Warmup uniform LoRA -> allocator picks per-module ranks -> fresh stage 2.
-
-    Shared by hardware_aware and gradient_adaptive; only allocator.alpha differs.
-    """
     method = cfg["method"]
     set_seed(cfg["training"]["seed"])
     device = _resolve_device()
@@ -387,7 +376,6 @@ def run_two_stage(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_adalora(cfg: dict[str, Any]) -> dict[str, Any]:
-    """AdaLoRA baseline. PEFT's update_and_allocate fires every step via post_step_hook."""
     set_seed(cfg["training"]["seed"])
     device = _resolve_device()
 

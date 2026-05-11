@@ -13,11 +13,7 @@ from src.lora_utils import (
 
 
 class HardwareAwareRankAllocator:
-    """Per-module rank allocator: s_i = g_i / c_i ** alpha.
-
-    g_i is an EMA over LoRA Frobenius grad norms (update_gradient_scores);
-    c_i is per-rank parameter cost (in_dim + out_dim). alpha=0 -> gradient-only.
-    """
+    # s_i = g_i / c_i ** alpha; alpha=0 -> gradient-only
 
     def __init__(
         self,
@@ -73,7 +69,7 @@ class HardwareAwareRankAllocator:
         }
 
     def allocate_ranks(self, scores: Mapping[str, float]) -> dict[str, int]:
-        """Floor at min_rank, distribute leftover proportionally, clip, rebalance."""
+        # floor at min_rank, distribute leftover proportionally, clip, rebalance
         n = len(scores)
         if n == 0:
             raise ValueError("scores is empty")

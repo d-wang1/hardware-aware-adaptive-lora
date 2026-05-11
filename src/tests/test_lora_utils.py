@@ -14,7 +14,6 @@ from src.lora_utils import (
 
 
 class _MiniBackbone(nn.Module):
-    """Two attention-style projections named like DistilBERT targets."""
 
     def __init__(self, in_dim: int = 64, out_dim: int = 64):
         super().__init__()

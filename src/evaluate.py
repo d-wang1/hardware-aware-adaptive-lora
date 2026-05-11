@@ -46,7 +46,6 @@ def evaluate(
 
 
 class TargetAccuracyTracker:
-    """Locks step + wall-clock the first time val_accuracy crosses target."""
 
     def __init__(self, target: float, start_time: float | None = None) -> None:
         self.target = target

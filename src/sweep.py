@@ -1,14 +1,3 @@
-"""Multi-seed x multi-method sweep driver.
-
-Shells out to `python -m src.train` once per (method, seed), then runs
-`python -m src.metrics` to populate results/summaries and results/figures.
-Cross-platform; on Windows use this instead of experiments/run_sweep.sh.
-
-Examples:
-    python -m src.sweep
-    python -m src.sweep --methods uniform adalora
-    python -m src.sweep --seeds 42 --skip-aggregate
-"""
 from __future__ import annotations
 
 import argparse
