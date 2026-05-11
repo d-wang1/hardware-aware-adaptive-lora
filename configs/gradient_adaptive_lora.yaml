@@ -1,4 +1,4 @@
-method: gradient_adaptive   # equivalent to hardware_aware with alpha = 0.0
+method: gradient_adaptive   # hardware_aware with alpha=0.0
 
 model:
   name: distilbert-base-uncased
@@ -13,12 +13,12 @@ lora:
   initial_rank: 8
   min_rank: 2
   max_rank: 16
-  total_rank_budget: 192   # 24 modules * uniform 8 — same as uniform_lora.yaml
+  total_rank_budget: 192   # matches uniform_lora.yaml
   alpha_lora: 16
   dropout: 0.0
 
 allocator:
-  hardware_alpha: 0.0       # gradient-only — no hardware-cost penalty
+  hardware_alpha: 0.0       # gradient-only; no hardware-cost penalty
   ema_beta: 0.9
   cost_proxy: parameter     # c_i = d_i + k_i
 

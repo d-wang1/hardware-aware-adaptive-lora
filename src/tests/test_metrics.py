@@ -1,9 +1,3 @@
-"""Phase 6 — unit tests for src.metrics.
-
-Synthetic JSONL fixtures only; no real DistilBERT / training (consistent
-with test_train.py + test_lora_utils.py: the convention is fast unit tests
-+ out-of-band ``--smoke`` verification for the real pipeline).
-"""
 from __future__ import annotations
 
 import json
@@ -15,7 +9,7 @@ import pytest
 from src.metrics import (
     ALPHA_SWEEP_VARIANTS,
     PRIMARY_VARIANTS,
-    _attention_rank_share,
+    _attn_share,
     _short_module_name,
     alpha_sweep_table,
     hardware_table,
@@ -31,12 +25,8 @@ from src.metrics import (
 )
 
 
-# --- fixture builders ---------------------------------------------------
-
-
 def _module_names() -> list[str]:
-    """24 PEFT-style FQ module names matching the Phase 5.6 production
-    layout: 6 layers × {q_lin, v_lin, lin1, lin2}."""
+    # 24 PEFT-style fqnames: 6 layers x {q_lin, v_lin, lin1, lin2}
     out: list[str] = []
     for layer in range(6):
         for leaf in ("q_lin", "v_lin", "lin1", "lin2"):
@@ -65,9 +55,7 @@ def _write_run(
     rank_dict: dict[str, int] | None = None,
     eval_curve: list[tuple[int, float, float, float]] | None = None,
 ) -> None:
-    """Write a JSONL log file matching the schema produced by HardwareLogger
-    + src.train. ``eval_curve`` is a list of (step, dt_from_t0, val_loss,
-    val_accuracy) for the per-eval-interval rows."""
+    """Write a JSONL log file in the schema produced by HardwareLogger + src.train."""
     path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     cfg: dict = {
@@ -136,13 +124,10 @@ def _write_run(
 
 
 def _attn_skewed_rank_dict(total: int = 192) -> dict[str, int]:
-    """Rank dict that puts most rank on attention modules (the post-Phase-5.6
-    expected pattern for hardware-aware: cheap attention modules absorb
-    rank because c_i is smaller). Sum equals ``total``."""
+    # hardware-aware pattern: cheap attention modules absorb most of the rank
     mods = _module_names()
     attn_modules = [m for m in mods if "q_lin" in m or "v_lin" in m]
     ffn_modules = [m for m in mods if "lin1" in m or "lin2" in m]
-    # Give attention rank 12 each (12*12 = 144) and FFN rank 4 each (12*4 = 48).
     rd = {m: 12 for m in attn_modules}
     rd.update({m: 4 for m in ffn_modules})
     assert sum(rd.values()) == total
@@ -150,8 +135,7 @@ def _attn_skewed_rank_dict(total: int = 192) -> dict[str, int]:
 
 
 def _ffn_skewed_rank_dict(total: int = 192) -> dict[str, int]:
-    """Inverse of the above — gradient-only's expected pattern (FFN gradients
-    are larger, so without the cost penalty rank flows there)."""
+    # gradient-only pattern: larger FFN gradients pull rank into the FFN
     mods = _module_names()
     attn_modules = [m for m in mods if "q_lin" in m or "v_lin" in m]
     ffn_modules = [m for m in mods if "lin1" in m or "lin2" in m]
@@ -162,8 +146,7 @@ def _ffn_skewed_rank_dict(total: int = 192) -> dict[str, int]:
 
 
 def _build_full_sweep(tmp_path: Path) -> Path:
-    """3 seeds × {uniform, adalora, gradient_adaptive, hardware_aware α=1.0,
-    hardware_aware α=0.5}. 15 runs total; mirrors the planned Phase 6.8 sweep."""
+    # 3 seeds x 5 method-configs = 15 runs
     base = tmp_path / "raw_logs"
     for seed in (42, 43, 44):
         _write_run(base / "uniform" / f"uniform-seed{seed}.jsonl",
@@ -205,9 +188,6 @@ def _build_full_sweep(tmp_path: Path) -> Path:
     return base
 
 
-# --- reader / parser ----------------------------------------------------
-
-
 def test_parse_run_jsonl_extracts_config_alpha_and_final(tmp_path):
     p = tmp_path / "hw.jsonl"
     _write_run(
@@ -227,7 +207,6 @@ def test_parse_run_jsonl_extracts_config_alpha_and_final(tmp_path):
     assert rec.rank_dict is not None
     assert sum(rec.rank_dict.values()) == 192
     assert rec.eval_curve, "eval rows must be populated"
-    # eval_curve excludes config / reallocation / final rows.
     assert all(
         not isinstance(p.val_accuracy, type(None)) for p in rec.eval_curve
     )
@@ -236,7 +215,6 @@ def test_parse_run_jsonl_extracts_config_alpha_and_final(tmp_path):
 def test_parse_run_jsonl_rejects_missing_config_row(tmp_path):
     p = tmp_path / "broken.jsonl"
     with p.open("w", encoding="utf-8") as f:
-        # final row only — no event=config
         f.write(json.dumps({
             "method": "uniform", "step": 5, "timestamp": time.time(),
             "event": "final", "val_loss": 0.4, "val_accuracy": 0.9,
@@ -249,8 +227,7 @@ def test_parse_run_jsonl_rejects_missing_config_row(tmp_path):
 
 
 def test_parse_run_jsonl_rejects_missing_final_row(tmp_path):
-    """Run that crashed mid-training (no ``event="final"`` row) should be
-    skipped with a clear error rather than silently aggregated."""
+    # crashed mid-training -> no event=final, must error rather than aggregate
     p = tmp_path / "crashed.jsonl"
     t0 = time.time()
     with p.open("w", encoding="utf-8") as f:
@@ -258,7 +235,6 @@ def test_parse_run_jsonl_rejects_missing_final_row(tmp_path):
             "method": "uniform", "step": 0, "timestamp": t0,
             "event": "config", "seed": 0, "config": {"method": "uniform"},
         }) + "\n")
-        # one eval row, then nothing
         f.write(json.dumps({
             "method": "uniform", "step": 100, "timestamp": t0 + 5.0,
             "val_loss": 0.5, "val_accuracy": 0.8,
@@ -270,33 +246,23 @@ def test_parse_run_jsonl_rejects_missing_final_row(tmp_path):
 
 
 def test_load_run_records_dedupes_by_method_seed_alpha(tmp_path):
-    """Two runs at the same (method, seed, alpha) — e.g. a pre-sweep
-    verification run + the sweep's own seed=42 run for the same method —
-    must dedupe to one record. The lexicographically latest run_id wins
-    (run_id ends with UTC timestamp so this is chronological)."""
     base = tmp_path / "raw_logs"
-    # Two runs, same method+seed+alpha, different timestamps in run_id.
     early = base / "uniform" / "uniform-seed42-20260430T120000Z.jsonl"
     late = base / "uniform" / "uniform-seed42-20260501T120000Z.jsonl"
     _write_run(early, "uniform", seed=42, final_val_accuracy=0.85)
     _write_run(late, "uniform", seed=42, final_val_accuracy=0.92)
-    # Plus a different seed so we can confirm dedupe is per-(method,seed),
-    # not global.
     _write_run(
         base / "uniform" / "uniform-seed43-20260501T130000Z.jsonl",
         "uniform", seed=43, final_val_accuracy=0.91,
     )
     with pytest.warns(RuntimeWarning, match="de-duplicating"):
         records = load_run_records(base)
-    # 2 runs survive: the late seed=42 + the seed=43.
     assert len(records) == 2
     accs = {(r.seed, r.final_val_accuracy) for r in records}
     assert accs == {(42, 0.92), (43, 0.91)}
 
 
 def test_load_run_records_does_not_dedupe_across_alpha(tmp_path):
-    """hardware_aware at α=0.5 and α=1.0 share the same (method, seed) but
-    have different alpha. They are different variants and must not collapse."""
     base = tmp_path / "raw_logs"
     _write_run(
         base / "hardware_aware" / "hardware_aware-seed42-alpha1.jsonl",
@@ -326,9 +292,6 @@ def test_load_run_records_skips_broken_files_with_warning(tmp_path):
     assert records[0].method == "uniform"
 
 
-# --- variant grouping ---------------------------------------------------
-
-
 def test_variant_key_splits_hardware_aware_by_alpha(tmp_path):
     p1 = tmp_path / "hw1.jsonl"
     p05 = tmp_path / "hw05.jsonl"
@@ -344,14 +307,10 @@ def test_variant_key_uses_method_for_non_hardware_aware(tmp_path):
     assert variant_key(parse_run_jsonl(p)) == "uniform"
 
 
-# --- aggregation + tables ----------------------------------------------
-
-
 def test_summarize_groups_runs_by_variant(tmp_path):
     base = _build_full_sweep(tmp_path)
     records = load_run_records(base)
     primary = summarize(records, PRIMARY_VARIANTS)
-    # 4 primary variants × 3 seeds each.
     assert set(primary.keys()) == set(PRIMARY_VARIANTS.keys())
     for vk, s in primary.items():
         assert s.seeds == 3, vk
@@ -364,8 +323,7 @@ def test_statistical_table_has_one_row_per_primary_method(tmp_path):
     rows = statistical_table(summaries)
     assert rows[0] == ["Method", "Final Val Loss", "Final Val Accuracy",
                        "Steps to Target"]
-    assert len(rows) == 1 + 4  # header + 4 methods
-    # Steps-to-target column should be the (n/n) format
+    assert len(rows) == 1 + 4
     last_col = [r[-1] for r in rows[1:]]
     assert all("(3/3)" in c for c in last_col)
 
@@ -381,13 +339,12 @@ def test_hardware_table_includes_wall_clock(tmp_path):
 
 
 def test_systems_tradeoff_table_excludes_gradient_adaptive(tmp_path):
-    """README §1082-1088: only Uniform / AdaLoRA / Hardware-Aware in this
-    table. Gradient-adaptive must NOT appear — it's an ablation."""
+    # uniform / adalora / hardware_aware only; gradient_adaptive is an ablation
     base = _build_full_sweep(tmp_path)
     records = load_run_records(base)
     summaries = summarize(records, PRIMARY_VARIANTS)
     rows = systems_tradeoff_table(summaries)
-    assert len(rows) == 1 + 3  # header + 3 methods
+    assert len(rows) == 1 + 3
     method_col = [r[0] for r in rows[1:]]
     assert "Gradient" not in " ".join(method_col)
 
@@ -397,17 +354,13 @@ def test_alpha_sweep_table_has_three_alpha_rows(tmp_path):
     records = load_run_records(base)
     rows = alpha_sweep_table(records)
     assert len(rows) == 1 + 3
-    # Attn rank share column — α=1.0 (attn-skewed) > α=0.0 (ffn-skewed)
-    grad_share = float(rows[1][3].split(" ")[0])  # α=0.0 row
-    hw1_share = float(rows[3][3].split(" ")[0])   # α=1.0 row
-    assert hw1_share > grad_share, (
-        "hardware-aware α=1.0 must skew toward attention more than "
-        "gradient-only — see CLAUDE.md post-Phase-5.6 expected pattern"
-    )
+    # alpha=1.0 (attn-skewed) should skew toward attention more than alpha=0.0
+    grad_share = float(rows[1][3].split(" ")[0])
+    hw1_share = float(rows[3][3].split(" ")[0])
+    assert hw1_share > grad_share
 
 
-def test_attention_rank_share_matches_expected_pattern(tmp_path):
-    """Attn-skewed rank_dict → share > 0.5; FFN-skewed → share < 0.5."""
+def test_attn_share_matches_expected_pattern(tmp_path):
     p_attn = tmp_path / "hw.jsonl"
     p_ffn = tmp_path / "grad.jsonl"
     _write_run(p_attn, "hardware_aware", seed=0, alpha=1.0,
@@ -416,8 +369,8 @@ def test_attention_rank_share_matches_expected_pattern(tmp_path):
                rank_dict=_ffn_skewed_rank_dict())
     rec_attn = parse_run_jsonl(p_attn)
     rec_ffn = parse_run_jsonl(p_ffn)
-    assert _attention_rank_share(rec_attn) > 0.5
-    assert _attention_rank_share(rec_ffn) < 0.5
+    assert _attn_share(rec_attn) > 0.5
+    assert _attn_share(rec_ffn) < 0.5
 
 
 def test_short_module_name_strips_prefix():
@@ -425,9 +378,6 @@ def test_short_module_name_strips_prefix():
     assert _short_module_name(fq) == "L3.attn.q_lin"
     fq2 = "base_model.model.distilbert.transformer.layer.5.ffn.lin2"
     assert _short_module_name(fq2) == "L5.ffn.lin2"
-
-
-# --- end-to-end driver --------------------------------------------------
 
 
 def test_write_all_tables_produces_csv_and_md(tmp_path):
@@ -462,7 +412,7 @@ def test_write_table_round_trips_csv(tmp_path):
     md_p = tmp_path / "t.md"
     write_table(rows, csv_p, md_p)
     text = csv_p.read_text(encoding="utf-8")
-    # The "1,2" value must be quoted to survive CSV parsing.
+    # "1,2" must be quoted to survive CSV parsing
     assert '"1,2"' in text
     md_text = md_p.read_text(encoding="utf-8")
     assert md_text.startswith("| a | b |")

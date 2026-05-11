@@ -1,32 +1,4 @@
-"""Phase 6 — aggregate JSONL training logs into the README's three result
-tables (Statistical / Hardware / Systems Tradeoff), the α-sweep ablation
-table, and the project's headline figures (val-accuracy-vs-walltime, rank
-heatmap, peak-memory / throughput / scheduler-overhead bars).
-
-CLI::
-
-    python -m src.metrics --logs-dir results/raw_logs \\
-        --summaries-dir results/summaries --figures-dir results/figures
-
-Schema contract — every row is the JSONL produced by ``HardwareLogger`` plus
-the markers written by ``src.train``:
-
-* one ``event="config"`` row at step 0 carrying ``config`` (the resolved cfg
-  dict) and ``seed`` — Phase 6.7 added this; older logs without it are
-  skipped with a warning.
-* per-eval rows (no ``event`` key) with ``train_loss``, ``val_loss``,
-  ``val_accuracy``, ``trainable_parameters``.
-* optional ``event="reallocation"`` row (two-stage methods only) carrying
-  ``rank_dict``.
-* one terminal ``event="final"`` row with ``val_loss``, ``val_accuracy``,
-  ``trainable_parameters``, ``steps_to_target_accuracy``,
-  ``wall_clock_to_target``, and (for two-stage) ``rank_dict``.
-
-α-sweep: hardware_aware runs are split into variants by
-``cfg["allocator"]["hardware_alpha"]``. The primary tables include only
-α=1.0 (the canonical hardware-aware setting); the α-sweep table covers
-α ∈ {0.0 (= gradient_adaptive), 0.5, 1.0}.
-"""
+"""Aggregate JSONL training logs into result tables and figures."""
 from __future__ import annotations
 
 import argparse
@@ -39,12 +11,8 @@ from pathlib import Path
 from typing import Any
 
 
-# --- record + reader ----------------------------------------------------
-
-
 @dataclass
 class EvalPoint:
-    """One eval-interval row, used by the val-accuracy-vs-walltime curves."""
     step: int
     wall_clock_s: float
     val_loss: float
@@ -75,11 +43,7 @@ class RunRecord:
 
 
 def parse_run_jsonl(path: Path) -> RunRecord:
-    """Parse one run's JSONL file into a ``RunRecord``.
-
-    Raises ``ValueError`` if the file is empty, missing the config row
-    (older logs / pre-Phase-6.7), or missing the final row (run crashed).
-    """
+    """Read one run's JSONL into a RunRecord. Raises if config or final row missing."""
     with path.open(encoding="utf-8") as fh:
         rows = [json.loads(line) for line in fh if line.strip()]
     if not rows:
@@ -98,10 +62,10 @@ def parse_run_jsonl(path: Path) -> RunRecord:
             f"no event=\"final\" row in {path.name}; run may have crashed."
         )
     if len(final_rows) > 1:
+        # append-mode write into the same run_id; take the last
         warnings.warn(
             f"{path.name} has {len(final_rows)} \"final\" rows; using the "
-            f"last one. May indicate the same run_id was logged twice "
-            f"(append-mode). See CLAUDE.md JSONL note.",
+            f"last one.",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -157,14 +121,8 @@ def parse_run_jsonl(path: Path) -> RunRecord:
 
 
 def _dedupe_runs(records: list[RunRecord]) -> list[RunRecord]:
-    """For runs sharing ``(method, seed, alpha)``, keep only the
-    lexicographically latest ``run_id`` and warn about the rest.
-
-    Duplicates usually mean the same configuration was re-run (e.g. a
-    pre-sweep verification + the sweep itself, both at seed=42). Including
-    both biases the mean/std for that variant. ``run_id`` ends with a UTC
-    timestamp so lexicographic sort = chronological sort.
-    """
+    """For runs sharing (method, seed, alpha) keep the latest run_id."""
+    # run_id ends with a UTC stamp so lexicographic sort == chronological
     by_key: dict[tuple[str, int, float | None], list[RunRecord]] = {}
     for rec in records:
         key = (rec.method, rec.seed, rec.alpha)
@@ -188,12 +146,6 @@ def _dedupe_runs(records: list[RunRecord]) -> list[RunRecord]:
 
 
 def load_run_records(logs_dir: Path) -> list[RunRecord]:
-    """Walk ``logs_dir`` recursively, returning one record per readable run.
-
-    Files without an ``event="config"`` row are skipped with a warning.
-    Runs sharing ``(method, seed, alpha)`` are de-duped (latest kept) so
-    pre-sweep verification runs don't poison the aggregation.
-    """
     records: list[RunRecord] = []
     for path in sorted(Path(logs_dir).rglob("*.jsonl")):
         try:
@@ -205,20 +157,13 @@ def load_run_records(logs_dir: Path) -> list[RunRecord]:
     return _dedupe_runs(records)
 
 
-# --- variant grouping ---------------------------------------------------
-
-
 def variant_key(rec: RunRecord) -> str:
-    """Stable id for the (method, α) combo. Hardware-aware is split by α
-    so the α-sweep ablation can isolate the cost-penalty axis without
-    polluting the four-method primary tables."""
+    # split hardware_aware by alpha so the alpha sweep stays separate
     if rec.method == "hardware_aware":
-        # ``f"{1.0:g}"`` → "1"; ``f"{0.5:g}"`` → "0.5".
         return f"hardware_aware_alpha{rec.alpha:g}"
     return rec.method
 
 
-# Order is the row order in the primary tables.
 PRIMARY_VARIANTS: dict[str, str] = {
     "uniform": "Uniform LoRA",
     "adalora": "AdaLoRA",
@@ -231,9 +176,6 @@ ALPHA_SWEEP_VARIANTS: dict[str, str] = {
     "hardware_aware_alpha0.5": "α=0.5",
     "hardware_aware_alpha1": "α=1.0 (full hardware penalty)",
 }
-
-
-# --- aggregation --------------------------------------------------------
 
 
 @dataclass
@@ -297,19 +239,13 @@ def _fmt_mean_std(values: list[float], digits: int = 3) -> str:
 
 
 def _fmt_partial(values: list[Any], digits: int = 1) -> str:
-    """Format for fields where some seeds may be ``None`` (target never crossed).
-
-    ``"1850 ± 120 (3/3)"`` if all crossed, ``"never (0/3)"`` if none did.
-    """
+    # "1850 ± 120 (3/3)" if all crossed, "never (0/3)" if none did
     n = len(values)
     crossed = [float(v) for v in values if v is not None]
     if not crossed:
         return f"never (0/{n})"
     m, s = _mean_std(crossed)
     return f"{m:.{digits}f} ± {s:.{digits}f} ({len(crossed)}/{n})"
-
-
-# --- table writers ------------------------------------------------------
 
 
 def _csv_escape(s: str) -> str:
@@ -319,7 +255,7 @@ def _csv_escape(s: str) -> str:
 
 
 def write_table(rows: list[list[str]], out_csv: Path, out_md: Path) -> None:
-    """Write the same table to ``out_csv`` and ``out_md``. ``rows[0]`` is the header."""
+    """Write the same table to out_csv and out_md. rows[0] is the header."""
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     out_md.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", encoding="utf-8") as f:
@@ -374,15 +310,14 @@ def hardware_table(
 def systems_tradeoff_table(
     summaries: dict[str, VariantSummary]
 ) -> list[list[str]]:
-    """Per README §1082-1088 this table is Uniform / AdaLoRA / Hardware-Aware
-    only — gradient_adaptive is an ablation, not a method-vs-method baseline."""
+    # uniform / adalora / hardware_aware only; gradient_adaptive is an ablation
     rows = [["Method", "Accuracy per MB", "Time to Target (s)",
              "Scheduler Overhead (s)"]]
     for vk in ("uniform", "adalora", "hardware_aware_alpha1"):
         if vk not in summaries:
             continue
         s = summaries[vk]
-        # Per-seed ratio first, then mean ± std (avoids dividing means).
+        # per-seed ratio first, then mean ± std; avoids dividing means
         acc_per_mb = [
             (a / m) if m and m > 0 else float("nan")
             for a, m in zip(s.final_val_accuracy, s.peak_memory_mb)
@@ -396,13 +331,8 @@ def systems_tradeoff_table(
     return rows
 
 
-def _attention_rank_share(rec: RunRecord) -> float | None:
-    """Fraction of total rank assigned to attention modules (q_lin / v_lin).
-
-    Matches CLAUDE.md's post-Phase-5.6 expected pattern: hardware-aware
-    skews toward attention (cheaper per parameter) → high share; gradient-
-    only skews toward FFN → low share.
-    """
+def _attn_share(rec: RunRecord) -> float | None:
+    """Fraction of total rank assigned to attention modules (q_lin / v_lin)."""
     if rec.rank_dict is None:
         return None
     attn = sum(
@@ -416,7 +346,6 @@ def _attention_rank_share(rec: RunRecord) -> float | None:
 
 
 def alpha_sweep_table(records: list[RunRecord]) -> list[list[str]]:
-    """``α | Final Val Accuracy | Time to Target | Attn Rank Share``."""
     summaries = summarize(records, ALPHA_SWEEP_VARIANTS)
     rows = [["α / Variant", "Final Val Accuracy", "Time to Target (s)",
              "Attn Rank Share"]]
@@ -426,8 +355,8 @@ def alpha_sweep_table(records: list[RunRecord]) -> list[list[str]]:
         s = summaries[vk]
         runs = [r for r in records if variant_key(r) == vk]
         attn_shares = [
-            _attention_rank_share(r) for r in runs
-            if _attention_rank_share(r) is not None
+            _attn_share(r) for r in runs
+            if _attn_share(r) is not None
         ]
         rows.append([
             label,
@@ -437,9 +366,6 @@ def alpha_sweep_table(records: list[RunRecord]) -> list[list[str]]:
             if attn_shares else "—",
         ])
     return rows
-
-
-# --- figures -----------------------------------------------------------
 
 
 _PRIMARY_COLORS = {
@@ -453,8 +379,7 @@ _PRIMARY_COLORS = {
 def figure_val_accuracy_vs_walltime(
     records: list[RunRecord], out_path: Path
 ) -> None:
-    """README §1099 primary figure. One faded line per seed, one solid mean
-    line per method. X-axis is wall-clock to make the systems claim visible."""
+    """One faded line per seed + one solid mean line per method."""
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -469,7 +394,7 @@ def figure_val_accuracy_vs_walltime(
             ys = [p.val_accuracy for p in r.eval_curve]
             if xs:
                 ax.plot(xs, ys, color=color, alpha=0.25, linewidth=0.8)
-        # Mean curve aligned by step (eval_interval is identical across seeds).
+        # mean curve, aligned by step (eval_interval is identical across seeds)
         steps_set = sorted({p.step for r in runs for p in r.eval_curve})
         xs_mean: list[float] = []
         ys_mean: list[float] = []
@@ -501,11 +426,7 @@ def figure_val_accuracy_vs_walltime(
 
 
 def _short_module_name(fqname: str) -> str:
-    """Strip the long PEFT prefix so heatmap x-tick labels stay readable.
-
-    ``base_model.model.distilbert.transformer.layer.3.attention.q_lin``
-    → ``L3.attn.q_lin``; ``...layer.5.ffn.lin2`` → ``L5.ffn.lin2``.
-    """
+    # "...layer.3.attention.q_lin" -> "L3.attn.q_lin"
     parts = fqname.split(".")
     layer = next(
         (parts[i + 1] for i in range(len(parts) - 1) if parts[i] == "layer"),
@@ -519,10 +440,7 @@ def _short_module_name(fqname: str) -> str:
 def figure_rank_allocation_heatmap(
     records: list[RunRecord], out_path: Path
 ) -> None:
-    """Module × variant matrix of mean rank. Uniform's row is filled from
-    cfg["lora"]["rank"] since uniform doesn't log a rank_dict; AdaLoRA's row
-    is left blank — its 'effective rank' depends on PEFT's internal pruning
-    schedule and is non-trivial to extract post-hoc (Phase 6 deferral)."""
+    """Module x variant matrix of mean rank. AdaLoRA row blank (no rank_dict in log)."""
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -544,7 +462,7 @@ def figure_rank_allocation_heatmap(
         if r.rank_dict:
             all_modules.update(r.rank_dict.keys())
     if not all_modules:
-        return  # nothing to plot
+        return
     modules = sorted(all_modules)
     matrix = np.full((len(variants_to_plot), len(modules)), np.nan)
 
@@ -553,7 +471,7 @@ def figure_rank_allocation_heatmap(
         if not runs:
             continue
         if vk == "uniform":
-            # No rank_dict logged; fill with the constant rank from cfg.
+            # uniform doesn't log a rank_dict; fill with the constant from cfg
             uniform_rank = int(runs[0].config["lora"]["rank"])
             for j, _ in enumerate(modules):
                 matrix[i, j] = float(uniform_rank)
@@ -588,9 +506,7 @@ def figure_metric_bars(
     ylabel: str,
     out_path: Path,
 ) -> None:
-    """Bar chart of one per-run scalar metric across the four primary
-    methods, with per-seed scatter overlay. ``metric_name`` is a field on
-    ``VariantSummary`` (e.g. ``"peak_memory_mb"``)."""
+    """Bar chart of one per-run scalar metric across the four primary methods."""
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -636,9 +552,6 @@ def figure_metric_bars(
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-
-
-# --- top-level driver ---------------------------------------------------
 
 
 def write_all_tables(
@@ -690,15 +603,9 @@ def write_all_figures(
     )
 
 
-# --- CLI ---------------------------------------------------------------
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Aggregate JSONL training logs into the README's three result "
-            "tables, the α-sweep table, and the project's figures."
-        ),
+        description="Aggregate JSONL logs into result tables and figures.",
     )
     parser.add_argument("--logs-dir", required=True, type=Path)
     parser.add_argument("--summaries-dir", required=True, type=Path)

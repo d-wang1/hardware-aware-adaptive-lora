@@ -1,7 +1,3 @@
-"""Tests for src.evaluate.
-
-Uses tiny stub models so the test set runs in <1s without HF / network.
-"""
 from __future__ import annotations
 
 import math
@@ -16,21 +12,13 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.evaluate import TargetAccuracyTracker, evaluate
 
 
-# --- Stub models ----------------------------------------------------------
-
-
 class _LabelEchoClassifier(nn.Module):
-    """Returns logits whose argmax equals ``input_ids[:, 0]``.
-
-    Pair this with batches where input_ids[:, 0] == labels and you get a
-    perfect classifier — useful for asserting the eval loop reads logits
-    correctly and that loss is small when predictions are confident.
-    """
+    """Returns logits whose argmax equals input_ids[:, 0]."""
 
     def __init__(self, num_classes: int = 2):
         super().__init__()
         self.num_classes = num_classes
-        # at least one parameter so .train() / .eval() are observable on a real model
+        # one param so .train()/.eval() are observable
         self._dummy = nn.Parameter(torch.zeros(1))
 
     def forward(self, input_ids, **kwargs):
@@ -44,8 +32,6 @@ class _LabelEchoClassifier(nn.Module):
 
 
 class _AlwaysClassZero(nn.Module):
-    """Uniform-zero logits => argmax == 0 for every example."""
-
     def __init__(self, num_classes: int = 2):
         super().__init__()
         self.num_classes = num_classes
@@ -61,7 +47,6 @@ class _AlwaysClassZero(nn.Module):
 
 
 def _make_loader(input_ids: torch.Tensor, labels: torch.Tensor, batch_size: int = 4):
-    """Build a DataLoader yielding {input_ids, labels} dicts (HF-collator-style)."""
     ds = TensorDataset(input_ids, labels)
 
     def collate(batch):
@@ -72,24 +57,19 @@ def _make_loader(input_ids: torch.Tensor, labels: torch.Tensor, batch_size: int 
     return DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate)
 
 
-# --- evaluate() -----------------------------------------------------------
-
-
 def test_evaluate_perfect_predictions():
     model = _LabelEchoClassifier(num_classes=2)
     labels = torch.tensor([0, 1, 0, 1, 1, 0, 1, 0], dtype=torch.long)
     input_ids = torch.zeros(len(labels), 5, dtype=torch.long)
-    input_ids[:, 0] = labels  # encode the label in the input
+    input_ids[:, 0] = labels
     loader = _make_loader(input_ids, labels, batch_size=3)
 
     metrics = evaluate(model, loader, device="cpu")
     assert metrics["val_accuracy"] == pytest.approx(1.0)
-    # logits are 10 vs -10, very confident -> CE loss tiny
     assert metrics["val_loss"] < 1e-6
 
 
 def test_evaluate_deterministic_50pct_accuracy():
-    """Always-class-zero model on balanced labels gives exactly 50%."""
     model = _AlwaysClassZero(num_classes=2)
     labels = torch.tensor([0, 1, 0, 1, 0, 1, 0, 1], dtype=torch.long)
     input_ids = torch.zeros(len(labels), 5, dtype=torch.long)
@@ -97,7 +77,7 @@ def test_evaluate_deterministic_50pct_accuracy():
 
     metrics = evaluate(model, loader, device="cpu")
     assert metrics["val_accuracy"] == pytest.approx(0.5)
-    # Uniform logits -> CE = log(num_classes) = log(2) ~= 0.693
+    # uniform logits -> CE = log(2)
     assert metrics["val_loss"] == pytest.approx(math.log(2), rel=1e-5)
 
 
@@ -134,9 +114,6 @@ def test_evaluate_empty_loader_returns_nan():
     assert math.isnan(metrics["val_accuracy"])
 
 
-# --- TargetAccuracyTracker -----------------------------------------------
-
-
 def test_target_accuracy_tracker_records_first_crossing():
     tracker = TargetAccuracyTracker(target=0.9)
     assert tracker.reached is False
@@ -157,7 +134,6 @@ def test_target_accuracy_tracker_records_first_crossing():
 
 
 def test_target_accuracy_tracker_locks_after_first_crossing():
-    """A second crossing returns False and does not overwrite recorded values."""
     tracker = TargetAccuracyTracker(target=0.9)
     tracker.update(step=100, val_accuracy=0.95)
     first_step = tracker.steps_to_target
@@ -179,14 +155,12 @@ def test_target_accuracy_tracker_never_reached():
 
 
 def test_target_accuracy_tracker_exact_threshold_counts():
-    """``>=`` semantics: hitting target exactly is a crossing."""
     tracker = TargetAccuracyTracker(target=0.9)
     assert tracker.update(step=100, val_accuracy=0.9) is True
 
 
 def test_target_accuracy_tracker_uses_provided_start_time():
-    """Caller-supplied ``start_time`` aligns wall-clock with HardwareLogger."""
-    fake_start = time.perf_counter() - 10.0  # pretend training began 10s ago
+    fake_start = time.perf_counter() - 10.0
     tracker = TargetAccuracyTracker(target=0.9, start_time=fake_start)
     tracker.update(step=50, val_accuracy=0.95)
     assert tracker.wall_clock_to_target is not None

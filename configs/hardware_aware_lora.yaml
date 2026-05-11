@@ -13,14 +13,14 @@ lora:
   initial_rank: 8
   min_rank: 2
   max_rank: 16
-  total_rank_budget: 192   # 24 modules * uniform 8 — same as uniform_lora.yaml
+  total_rank_budget: 192   # matches uniform_lora.yaml
   alpha_lora: 16
   dropout: 0.0
 
 allocator:
-  hardware_alpha: 1.0       # full importance-per-cost; ablate with {0.0, 0.5, 1.0}
+  hardware_alpha: 1.0       # ablate over {0.0, 0.5, 1.0}
   ema_beta: 0.9
-  cost_proxy: parameter     # c_i = d_i + k_i  (initial); switch to 'activation' for b*s*(d_i+k_i)
+  cost_proxy: parameter     # c_i = d_i + k_i
 
 training:
   batch_size: 32

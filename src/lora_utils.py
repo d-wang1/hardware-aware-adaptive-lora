@@ -1,13 +1,3 @@
-"""LoRA module enumeration, gradient access, and (non-)uniform attachment.
-
-Sits between PEFT and the rank allocator. The allocator (Phase 4b) needs:
-
-- A way to walk the model and read per-module gradients (``lora_grad_norms``).
-- A way to map "module name" -> "per-rank parameter cost" (``parameter_cost``
-  applied to each module's in/out dims from ``enumerate_lora_modules``).
-- A way to materialize a chosen rank assignment back into a fresh PEFT model
-  (``build_non_uniform_lora_model``).
-"""
 from __future__ import annotations
 
 from typing import Iterable, Mapping
@@ -20,23 +10,12 @@ _PEFT_PREFIX = "base_model.model."
 
 
 def parameter_cost(in_dim: int, out_dim: int) -> int:
-    """Per-rank trainable parameter cost: every additional rank adds one row
-    of A (length ``in_dim``) and one column of B (length ``out_dim``), so the
-    cost is ``in_dim + out_dim``. The Phase 4b allocator uses this as the
-    denominator in ``s_i = g_i / c_i^α``.
-    """
+    # each extra rank adds one A row (in_dim) + one B column (out_dim)
     return in_dim + out_dim
 
 
 def enumerate_lora_modules(peft_model: PeftModel) -> dict[str, dict]:
-    """Return ``{fqname: {"A", "B", "in_dim", "out_dim", "rank"}}`` for every
-    LoRA-injected target in ``peft_model``.
-
-    ``in_dim`` / ``out_dim`` are the wrapped ``nn.Linear``'s features (used for
-    the cost proxy), not the bottleneck rank — those stay separate as ``rank``.
-    Looks up the ``"default"`` adapter (PEFT's standard single-adapter slot);
-    if the project ever uses named adapters this needs revisiting.
-    """
+    """Walk a PEFT model and return per-target {A, B, in_dim, out_dim, rank}."""
     out: dict[str, dict] = {}
     for fqname, module in peft_model.named_modules():
         if not isinstance(module, LoraLinear):
@@ -68,12 +47,6 @@ def build_uniform_lora_model(
     dropout: float = 0.0,
     task_type: TaskType | str | None = TaskType.SEQ_CLS,
 ) -> PeftModel:
-    """Wrap ``base_model`` in PEFT with the same rank on every target.
-
-    ``target_modules`` accepts either suffixes (``["q_lin", "v_lin"]``) or
-    fully-qualified names — PEFT's matcher handles both. Used directly for
-    the uniform baseline and for Stage 1 (warmup) of the adaptive methods.
-    """
     config = LoraConfig(
         r=rank,
         lora_alpha=alpha,
@@ -86,18 +59,8 @@ def build_uniform_lora_model(
 
 
 def lora_grad_norms(peft_model: PeftModel) -> dict[str, float]:
-    """Return ``{fqname: ||grad(A)||_F + ||grad(B)||_F}`` over LoRA modules.
-
-    This is the per-module gradient signal ``g_i`` that the Phase 4b allocator
-    consumes (combined into ``s_i = g_i / c_i^α``). The Frobenius norms of A
-    and B are summed because both halves of the low-rank product carry signal
-    about how much the bottleneck is being used; either alone undercounts.
-
-    Any tensor whose ``.grad`` is ``None`` (e.g. before the first backward
-    pass, or when frozen) contributes ``0.0`` rather than raising — the
-    allocator should be safe to call at any point in training, including
-    warmup step 0 when the EMA is being seeded.
-    """
+    """{fqname: ||grad(A)||_F + ||grad(B)||_F}; modules with no grad yet return 0."""
+    # sum A and B norms because either alone undercounts how much the bottleneck moves
     out: dict[str, float] = {}
     for fqname, info in enumerate_lora_modules(peft_model).items():
         a, b = info["A"], info["B"]
@@ -115,24 +78,7 @@ def build_non_uniform_lora_model(
     dropout: float = 0.0,
     task_type: TaskType | str | None = TaskType.SEQ_CLS,
 ) -> PeftModel:
-    """Wrap ``base_model`` in PEFT with per-module ranks taken from ``rank_dict``.
-
-    Used for Stage 2 of the two-stage adaptive flow: after the allocator
-    decides each module's rank, we throw away the warmup PEFT wrapper and
-    rebuild a fresh one with ``LoraConfig.rank_pattern``. Keys in
-    ``rank_dict`` are the same fqnames produced by ``enumerate_lora_modules``
-    (post-wrap, prefixed with ``base_model.model.``); we strip that prefix
-    before handing them to PEFT, which matches ``rank_pattern`` keys against
-    *pre-wrap* paths inside the base model.
-
-    The default ``r`` is set to ``max(rank_dict.values())`` so any unmatched
-    module — there shouldn't be any if the dict came straight from
-    ``enumerate_lora_modules`` — still gets a sensible (and never zero) rank
-    rather than crashing or silently dropping. ``target_modules`` still has
-    to be passed explicitly so PEFT knows which leaves to wrap; the
-    ``rank_pattern`` only chooses *what rank* to use among already-targeted
-    modules, not *whether* to target them.
-    """
+    """Wrap base_model with per-module ranks via LoraConfig.rank_pattern."""
     if not rank_dict:
         raise ValueError(
             "rank_dict is empty; pass at least one module->rank entry"
@@ -140,6 +86,7 @@ def build_non_uniform_lora_model(
     if any(r < 1 for r in rank_dict.values()):
         raise ValueError(f"all ranks must be >= 1; got {dict(rank_dict)}")
     default_r = max(rank_dict.values())
+    # rank_pattern keys match pre-wrap paths, so strip PEFT's wrapper prefix
     peft_rank_pattern = {
         k.removeprefix(_PEFT_PREFIX): v for k, v in rank_dict.items()
     }

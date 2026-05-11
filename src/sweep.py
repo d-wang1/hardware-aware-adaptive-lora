@@ -1,20 +1,13 @@
-"""Phase 6.5 — cross-platform multi-seed × multi-method sweep driver.
+"""Multi-seed x multi-method sweep driver.
 
-Python equivalent of ``experiments/run_sweep.sh`` for hosts without bash
-(Windows cmd / PowerShell). Same behavior: shells out to
-``python -m src.train`` once per (method, seed), then auto-aggregates
-via ``python -m src.metrics``.
+Shells out to `python -m src.train` once per (method, seed), then runs
+`python -m src.metrics` to populate results/summaries and results/figures.
+Cross-platform; on Windows use this instead of experiments/run_sweep.sh.
 
-CLI::
-
-    python -m src.sweep                                  # 5 methods × 3 seeds (default)
-    python -m src.sweep --methods uniform adalora        # subset of methods
-    python -m src.sweep --seeds 42                       # single seed
-    python -m src.sweep --skip-aggregate                 # don't auto-call src.metrics
-
-Returns non-zero exit code if any individual run failed; the sweep does
-not abort early so a single transient failure doesn't waste the rest of
-the queue. Failed (method, seed) pairs are listed at the end.
+Examples:
+    python -m src.sweep
+    python -m src.sweep --methods uniform adalora
+    python -m src.sweep --seeds 42 --skip-aggregate
 """
 from __future__ import annotations
 
@@ -27,11 +20,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Method label → config yaml path. Keep in sync with experiments/*.sh.
-# These five are the Phase 6.8 production sweep set; the α=0.5 entry is the
-# only one without a corresponding experiments/run_<method>.sh because the
-# method label itself is non-canonical (it's still "hardware_aware" in the
-# yaml — just with a different alpha).
+# method label -> config yaml. Names aren't uniform so map explicitly.
 METHOD_CONFIGS: dict[str, str] = {
     "uniform":                 "configs/uniform_lora.yaml",
     "adalora":                 "configs/adalora.yaml",
@@ -66,8 +55,7 @@ def aggregate() -> int:
 
 
 def _validate_configs(methods: list[str]) -> list[str]:
-    """Fail fast on a typo / missing config rather than 14 successful runs
-    followed by one mystery failure at the end."""
+    # fail fast on a typo rather than 14 good runs followed by a mystery failure
     missing: list[str] = []
     for m in methods:
         cfg_path = REPO_ROOT / METHOD_CONFIGS[m]
@@ -79,24 +67,22 @@ def _validate_configs(methods: list[str]) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a multi-seed × multi-method LoRA training sweep, then "
-            "aggregate the resulting JSONL logs into the README's tables "
-            "and figures. Cross-platform alternative to "
-            "experiments/run_sweep.sh."
+            "Run a multi-seed x multi-method LoRA training sweep, then "
+            "aggregate the JSONL logs into tables and figures."
         ),
     )
     parser.add_argument(
         "--methods", nargs="+", default=DEFAULT_METHODS,
         choices=list(METHOD_CONFIGS.keys()),
-        help="subset of methods to run (default: all 5)",
+        help="subset of methods (default: all 5)",
     )
     parser.add_argument(
         "--seeds", nargs="+", type=int, default=DEFAULT_SEEDS,
-        help="seeds to run for each method (default: 42 43 44)",
+        help="seeds (default: 42 43 44)",
     )
     parser.add_argument(
         "--skip-aggregate", action="store_true",
-        help="don't auto-call src.metrics after the sweep finishes",
+        help="don't run src.metrics after the sweep",
     )
     args = parser.parse_args(argv)
 
@@ -107,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     total = len(args.methods) * len(args.seeds)
-    print(f"sweep: {len(args.methods)} methods × {len(args.seeds)} seeds "
+    print(f"sweep: {len(args.methods)} methods x {len(args.seeds)} seeds "
           f"= {total} runs")
 
     start = time.time()

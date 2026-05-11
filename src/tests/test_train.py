@@ -1,10 +1,3 @@
-"""Unit tests for src.train helpers + a synthetic-model end-to-end exercise of
-``train_loop``. The full uniform path is verified out-of-band by running
-
-    python -m src.train --config configs/uniform_lora.yaml --smoke
-
-(too slow for the unit-test suite — pulls DistilBERT + SST-2).
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,7 +11,7 @@ from src.evaluate import TargetAccuracyTracker
 from src.hardware_logger import HardwareLogger
 from src.train import (
     _cycle,
-    _log_run_config,
+    _log_config,
     apply_smoke_overrides,
     build_optimizer_and_scheduler,
     load_config,
@@ -27,13 +20,8 @@ from src.train import (
 )
 
 
-# --- helper smoke tests --------------------------------------------------
-
-
 def test_load_config_round_trips_real_yaml():
-    """The shipped configs must parse — they're consumed by train.main.
-    Budget invariant: 24 modules (6 layers * 4 targets q_lin/v_lin/lin1/lin2)
-    * uniform rank 8 = 192."""
+    # 24 modules (6 layers * 4 targets) * uniform rank 8 = 192
     cfg = load_config("configs/uniform_lora.yaml")
     assert cfg["method"] == "uniform"
     assert cfg["lora"]["total_rank_budget"] == 192
@@ -43,7 +31,7 @@ def test_load_config_round_trips_real_yaml():
 def test_make_run_id_format():
     rid = make_run_id("uniform", 42)
     assert rid.startswith("uniform-seed42-")
-    # Ends with a UTC ISO-ish stamp (YYYYMMDDTHHMMSSZ = 16 chars)
+    # ends with YYYYMMDDTHHMMSSZ
     assert rid.endswith("Z") and len(rid.rsplit("-", 1)[-1]) == 16
 
 
@@ -56,17 +44,13 @@ def test_apply_smoke_overrides_clamps_training():
     assert t["eval_interval"] == 5
     assert t["epochs"] == 1
     assert t["num_workers"] == 0
-    # Two-stage methods need warmup_steps; smoke must set it so the same
-    # smoke flag works for hardware_aware / gradient_adaptive too.
+    # smoke must set warmup_steps so the same flag works for two-stage methods
     assert t["warmup_steps"] == 2
-    # Non-overridden keys preserved.
     assert t["batch_size"] == 32
     assert t["learning_rate"] == 2e-4
 
 
 def test_cycle_restarts_loader():
-    """``_cycle`` must keep yielding past the loader's natural end so
-    train_loop can be step-budgeted instead of epoch-budgeted."""
     ds = TensorDataset(torch.arange(4))
     loader = DataLoader(ds, batch_size=2)
     it = _cycle(loader)
@@ -75,25 +59,16 @@ def test_cycle_restarts_loader():
 
 
 def test_build_optimizer_and_scheduler_warmup_fraction():
-    """Linear warmup uses ~6% of total steps (rounded down, min 1). Sanity-
-    check the boundaries the project will actually hit (5 smoke / 100 short)."""
     model = nn.Linear(4, 2)
     cfg = {"learning_rate": 2e-4}
     _, sched1 = build_optimizer_and_scheduler(model, cfg, total_steps=5)
     _, sched2 = build_optimizer_and_scheduler(model, cfg, total_steps=100)
-    # Both schedules are LambdaLR; we just assert they produce a non-zero LR
-    # at step 0 (post-warmup setup) without crashing — the exact numbers come
-    # from HF's helper.
     assert sched1.get_last_lr()[0] >= 0.0
     assert sched2.get_last_lr()[0] >= 0.0
 
 
-# --- train_loop end-to-end on a synthetic model -------------------------
-
-
 class _StubHF(nn.Module):
-    """Mimics a HuggingFace classification head: ``forward(**batch)`` returns
-    a SimpleNamespace with ``.logits`` and ``.loss``."""
+    """Mimics an HF classifier: forward(**batch) -> SimpleNamespace(logits, loss)."""
 
     def __init__(self, in_dim: int = 4, num_labels: int = 2):
         super().__init__()
@@ -111,7 +86,6 @@ class _StubHF(nn.Module):
 def _toy_loader(n: int, seed: int = 0) -> DataLoader:
     g = torch.Generator().manual_seed(seed)
     features = torch.randn(n, 4, generator=g)
-    # Linearly separable-ish labels so the stub can actually learn.
     labels = (features.sum(dim=1) > 0).long()
 
     class _Ds:
@@ -124,9 +98,6 @@ def _toy_loader(n: int, seed: int = 0) -> DataLoader:
 
 
 def test_train_loop_writes_jsonl_and_advances_optimizer(tmp_path):
-    """One full pass through train_loop should: (1) write at least one JSONL
-    row at the eval boundary, (2) move the optimizer (loss decreases), (3)
-    return a final-eval dict with the correct step number."""
     torch.manual_seed(0)
     model = _StubHF()
     train_loader = _toy_loader(32, seed=0)
@@ -163,10 +134,9 @@ def test_train_loop_writes_jsonl_and_advances_optimizer(tmp_path):
     rows = [
         line for line in log_path.read_text(encoding="utf-8").splitlines() if line
     ]
-    # At eval_interval=5 over 10 steps we expect 2 eval rows (step 5, 10).
+    # eval_interval=5 over 10 steps -> 2 eval rows
     assert len(rows) == 2
 
-    # Optimizer made progress: re-evaluate, loss should be lower.
     val_batch = next(iter(val_loader))
     after_loss = nn.functional.cross_entropy(
         model.lin(val_batch["features"]),
@@ -175,12 +145,7 @@ def test_train_loop_writes_jsonl_and_advances_optimizer(tmp_path):
     assert after_loss < initial_loss_before, (after_loss, initial_loss_before)
 
 
-# --- main() dispatch -----------------------------------------------------
-
-
 def test_main_dispatches_hardware_aware_to_two_stage(monkeypatch):
-    """``main`` must route hardware_aware → run_two_stage. Spy on the
-    function to avoid touching DistilBERT in a unit test."""
     import src.train as t
     calls: list[str] = []
 
@@ -194,8 +159,6 @@ def test_main_dispatches_hardware_aware_to_two_stage(monkeypatch):
 
 
 def test_main_dispatches_gradient_adaptive_to_two_stage(monkeypatch):
-    """gradient_adaptive shares the two-stage code path with hardware_aware
-    (only allocator alpha differs). Same dispatch contract."""
     import src.train as t
     calls: list[str] = []
 
@@ -209,8 +172,6 @@ def test_main_dispatches_gradient_adaptive_to_two_stage(monkeypatch):
 
 
 def test_main_dispatches_adalora_to_run_adalora(monkeypatch):
-    """AdaLoRA path: same dispatch convention but a separate run function
-    because the per-step ``update_and_allocate`` hook lives only here."""
     import src.train as t
     calls: list[str] = []
 
@@ -224,21 +185,15 @@ def test_main_dispatches_adalora_to_run_adalora(monkeypatch):
 
 
 def test_apply_smoke_overrides_includes_adalora_knobs():
-    """Smoke must override AdaLoRA's tinit/tfinal/deltaT — defaults of
-    200/1000/10 would never fire in 5 smoke steps and the AdaLoRA hook
-    would silently no-op."""
+    # PEFT requires tinit + tfinal < total_step so the budgeting phase has room
     cfg = {"method": "adalora", "training": {"seed": 0}}
     apply_smoke_overrides(cfg)
-    # PEFT requires tinit + tfinal < total_step (=5) so the budgeting phase
-    # has room. tinit=1, tfinal=1 leaves steps 1-3 for reallocation.
     assert cfg["lora"]["tinit"] == 1
     assert cfg["lora"]["tfinal"] == 1
     assert cfg["lora"]["deltaT"] == 1
 
 
 def test_train_loop_calls_allocator_hook(tmp_path):
-    """When an allocator is passed, ``update_gradient_scores`` must be invoked
-    every step. This is the contract the two-stage flow (Phase 5.3) depends on."""
     torch.manual_seed(0)
     model = _StubHF()
     train_loader = _toy_loader(16)
@@ -272,11 +227,9 @@ def test_train_loop_calls_allocator_hook(tmp_path):
     assert spy.calls == 4
 
 
-def test_log_run_config_emits_event_config_row(tmp_path):
-    """Phase 6.7 contract: every dispatcher writes one ``event="config"``
-    row before training starts. Phase 6's metrics reader extracts per-run
-    knobs (notably ``allocator.hardware_alpha`` for the α-sweep) from this
-    row, so it must round-trip the full cfg + the seed."""
+def test_log_config_emits_event_config_row(tmp_path):
+    # config row must round-trip the full cfg + seed so the metrics reader can
+    # pull allocator.hardware_alpha for the alpha sweep
     import json
 
     cfg = {
@@ -291,7 +244,7 @@ def test_log_run_config_emits_event_config_row(tmp_path):
         "logging": {"output_dir": "results/raw_logs", "target_accuracy": 0.9},
     }
     with HardwareLogger(tmp_path, method="hardware_aware", run_id="rcfg") as logger:
-        _log_run_config(logger, cfg)
+        _log_config(logger, cfg)
 
     rows = [
         json.loads(line)
@@ -303,16 +256,12 @@ def test_log_run_config_emits_event_config_row(tmp_path):
     assert row["event"] == "config"
     assert row["step"] == 0
     assert row["seed"] == 7
-    # Whole cfg round-trips so metrics reader can pull alpha without re-loading yaml.
     assert row["config"]["allocator"]["hardware_alpha"] == 0.5
     assert row["config"]["lora"]["total_rank_budget"] == 192
 
 
 def test_train_loop_calls_post_step_hook_inside_scheduler_block(tmp_path):
-    """``post_step_hook`` is the AdaLoRA contract: invoked every step *after*
-    optimizer.step, inside ``logger.scheduler_block`` so its overhead lands
-    in ``scheduler_overhead_seconds``. The hook must receive the step number
-    (1-indexed; AdaLoRA's internal schedule is 1-indexed)."""
+    # post_step_hook fires every step inside scheduler_block (AdaLoRA contract)
     import time
     torch.manual_seed(0)
     model = _StubHF()
@@ -337,5 +286,4 @@ def test_train_loop_calls_post_step_hook_inside_scheduler_block(tmp_path):
             post_step_hook=hook,
         )
         assert seen_steps == [0, 1, 2]
-        # Scheduler overhead picked up the hook's sleeps (3 × 5ms ≈ 15ms).
         assert logger.scheduler_overhead_seconds >= 0.010

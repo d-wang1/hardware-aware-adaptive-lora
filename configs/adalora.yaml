@@ -10,8 +10,8 @@ lora:
     - v_lin
     - lin1
     - lin2
-  init_r: 12               # AdaLoRA starting rank per module
-  target_r: 8              # average rank after pruning — 24 modules * 8 = 192 matches uniform
+  init_r: 12               # starting rank per module
+  target_r: 8              # avg rank after pruning; 24*8 = 192 matches uniform
   total_rank_budget: 192
   alpha_lora: 16
   dropout: 0.0

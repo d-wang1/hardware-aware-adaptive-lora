@@ -1,8 +1,3 @@
-"""SST-2 dataset loading, tokenization, and seeding utilities.
-
-GLUE SST-2's `test` split has hidden labels (-1), so we use the GLUE
-`validation` split as the held-out evaluation set throughout the project.
-"""
 from __future__ import annotations
 
 import os
@@ -17,7 +12,6 @@ from transformers import DataCollatorWithPadding, PreTrainedTokenizerBase
 
 
 def set_seed(seed: int) -> None:
-    """Seed python, numpy, and torch (CPU + CUDA) for deterministic runs."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -38,12 +32,7 @@ def load_sst2(
     max_train_samples: int | None = None,
     max_val_samples: int | None = None,
 ) -> SST2Splits:
-    """Load and tokenize GLUE SST-2.
-
-    `max_train_samples` / `max_val_samples` exist for smoke runs (e.g. 1k-row subset).
-    Tokenization is dynamic-pad-friendly: we don't pad here so the collator can
-    pad to the longest sequence in each batch.
-    """
+    # GLUE SST-2 test split has hidden labels, so use validation as held-out
     raw = load_dataset("glue", "sst2")
 
     def tokenize(batch):
@@ -73,11 +62,6 @@ def make_dataloaders(
     eval_batch_size: int | None = None,
     num_workers: int = 2,
 ) -> tuple[DataLoader, DataLoader]:
-    """Build train + val DataLoaders with dynamic padding.
-
-    pin_memory=True is intentional: project trains on CUDA (see project memory
-    "Target hardware"), and pinned memory speeds up host->device transfer.
-    """
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     eval_bs = eval_batch_size or batch_size
     train_loader = DataLoader(

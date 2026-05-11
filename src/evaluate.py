@@ -1,11 +1,3 @@
-"""Validation loop and target-accuracy tracker.
-
-``evaluate()`` is shared by every training method: it produces ``val_loss`` and
-``val_accuracy`` for the JSONL log. ``TargetAccuracyTracker`` records the first
-step (and wall-clock seconds) at which validation accuracy crosses a configured
-target — this is how the README's "time-to-quality" / "steps-to-target" metrics
-become real numbers.
-"""
 from __future__ import annotations
 
 import time
@@ -21,13 +13,6 @@ def evaluate(
     val_loader: DataLoader,
     device: torch.device | str,
 ) -> dict[str, float]:
-    """Run one validation pass and return ``{"val_loss", "val_accuracy"}``.
-
-    Loss is summed across examples and divided by the example count, which
-    matches the standard CE-mean reported during training. Model train/eval
-    state is restored on exit so callers can drop this anywhere in the loop.
-    Empty loaders return ``nan`` for both metrics rather than dividing by zero.
-    """
     was_training = model.training
     model.eval()
 
@@ -48,8 +33,6 @@ def evaluate(
             total_correct += (preds == labels).sum().item()
             total_examples += labels.size(0)
     finally:
-        # Only re-enter train mode if we were already there; don't surprise
-        # callers who deliberately put the model in eval mode.
         if was_training:
             model.train()
 
@@ -63,14 +46,7 @@ def evaluate(
 
 
 class TargetAccuracyTracker:
-    """Record the first step and wall-clock time that ``val_accuracy >= target``.
-
-    Pair this with ``HardwareLogger``: pass ``logger``-relevant ``start_time``
-    so that ``wall_clock_to_target`` is measured from the same anchor as
-    everything else in the run. Once the threshold is crossed the recorded
-    values are locked — later high-accuracy evaluations don't overwrite them,
-    which matters for fair time-to-quality comparison across methods.
-    """
+    """Locks step + wall-clock the first time val_accuracy crosses target."""
 
     def __init__(self, target: float, start_time: float | None = None) -> None:
         self.target = target
@@ -81,9 +57,8 @@ class TargetAccuracyTracker:
         self.wall_clock_to_target: float | None = None
 
     def update(self, step: int, val_accuracy: float) -> bool:
-        """Record this evaluation. Returns ``True`` only on the *first* crossing."""
         if self.steps_to_target is not None:
-            return False  # already locked in
+            return False
         if val_accuracy >= self.target:
             self.steps_to_target = step
             self.wall_clock_to_target = time.perf_counter() - self._start_time

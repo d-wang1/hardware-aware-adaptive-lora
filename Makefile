@@ -26,12 +26,12 @@ hwaware05:
 
 all: uniform adalora grad hwaware
 
-# Full Phase 6.8 sweep: 5 method-configs × 3 seeds + auto-aggregate.
+# Full sweep: 5 method-configs x 3 seeds + auto-aggregate.
 # Override via env: `SEEDS="42 43" METHODS="uniform adalora" make sweep`
 sweep:
 	bash experiments/run_sweep.sh
 
-# Re-run the aggregator without re-training (when results/raw_logs is populated).
+# Re-run the aggregator without re-training.
 metrics:
 	$(PY) -m src.metrics \
 		--logs-dir results/raw_logs \
